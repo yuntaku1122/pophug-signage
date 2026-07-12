@@ -1,0 +1,11 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# アップロードされたPOP画像・表示状態（実行時に生成されるデータのため管理対象外）
+images/*
+!images/.gitkeep
