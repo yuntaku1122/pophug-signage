@@ -70,6 +70,15 @@ class PopSignage:
         else:
             self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 
+        # ROTATE_SCREENが90/270の場合、物理的な取り付け向きにより
+        # 「論理的な描画キャンバス」は実ディスプレイと縦横が入れ替わる。
+        # 全ての描画はこのcanvasに対して行い、最後にrun()内で回転させてscreenへ転写する。
+        sw, sh = self.screen.get_width(), self.screen.get_height()
+        if ROTATE_SCREEN in (90, 270):
+            self.canvas = pygame.Surface((sh, sw))
+        else:
+            self.canvas = pygame.Surface((sw, sh))
+
         pygame.display.set_caption("KitchenCar POP Signage")
         self.clock = pygame.time.Clock()
         self.font_medium = get_japanese_font(36)
@@ -117,8 +126,8 @@ class PopSignage:
         if mtimes == self._image_mtimes:
             return  # 変化なし
 
-        w = self.screen.get_width()
-        h = self.screen.get_height()
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
         new_images = []
         for f in files:
             path = os.path.join(IMAGE_FOLDER, f)
@@ -230,10 +239,10 @@ class PopSignage:
 
             # QR本体は画面の短辺の45%程度に収め、下のラベル・URL文字列も
             # 必ず表示できるよう余白を確保する
-            size = int(min(self.screen.get_width(), self.screen.get_height()) * 0.45)
+            size = int(min(self.canvas.get_width(), self.canvas.get_height()) * 0.45)
             surface = pygame.transform.scale(surface, (size, size))
 
-            max_text_width = self.screen.get_width() - 48
+            max_text_width = self.canvas.get_width() - 48
             self.qr_surface = surface
             self.qr_url = url
             self.qr_label_surface = self._render_fit_text(
@@ -264,13 +273,13 @@ class PopSignage:
             self.qr_active = False
             return
 
-        w = self.screen.get_width()
-        h = self.screen.get_height()
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
 
         overlay = pygame.Surface((w, h))
         overlay.set_alpha(235)
         overlay.fill((20, 20, 20))
-        self.screen.blit(overlay, (0, 0))
+        self.canvas.blit(overlay, (0, 0))
 
         qr = self.qr_surface
         label = self.qr_label_surface
@@ -285,14 +294,14 @@ class PopSignage:
 
         white_bg = pygame.Surface((qr.get_width() + 24, qr.get_height() + 24))
         white_bg.fill((255, 255, 255))
-        self.screen.blit(white_bg, (qr_x - 12, qr_y - 12))
-        self.screen.blit(qr, (qr_x, qr_y))
+        self.canvas.blit(white_bg, (qr_x - 12, qr_y - 12))
+        self.canvas.blit(qr, (qr_x, qr_y))
 
         label_y = qr_y + qr.get_height() + gap
-        self.screen.blit(label, (w // 2 - label.get_width() // 2, label_y))
+        self.canvas.blit(label, (w // 2 - label.get_width() // 2, label_y))
 
         url_y = label_y + label.get_height() + 10
-        self.screen.blit(url_s, (w // 2 - url_s.get_width() // 2, url_y))
+        self.canvas.blit(url_s, (w // 2 - url_s.get_width() // 2, url_y))
 
     # ---------------- 描画 ----------------
 
@@ -303,11 +312,11 @@ class PopSignage:
             next_idx = self.next_pop_index
 
         if not images:
-            self.screen.fill((30, 30, 30))
+            self.canvas.fill((30, 30, 30))
             text = self.font_medium.render("画像がありません", True, (255, 255, 255))
-            self.screen.blit(text, (
-                self.screen.get_width() // 2 - text.get_width() // 2,
-                self.screen.get_height() // 2
+            self.canvas.blit(text, (
+                self.canvas.get_width() // 2 - text.get_width() // 2,
+                self.canvas.get_height() // 2
             ))
             return
 
@@ -322,44 +331,57 @@ class PopSignage:
 
         if self.in_transition:
             self.transition_alpha -= (255 / (TRANSITION_DURATION * FPS))
-            self.screen.blit(images[next_idx % len(images)], (0, 0))
+            self.canvas.blit(images[next_idx % len(images)], (0, 0))
             fading_out = images[cur_idx % len(images)].copy()
             fading_out.set_alpha(max(0, int(self.transition_alpha)))
-            self.screen.blit(fading_out, (0, 0))
+            self.canvas.blit(fading_out, (0, 0))
             if self.transition_alpha <= 0:
                 self.transition_alpha = 255
                 self.current_pop_index = next_idx
                 self.pop_start_time = time.time()
                 self.in_transition = False
         else:
-            self.screen.blit(images[cur_idx % len(images)], (0, 0))
+            self.canvas.blit(images[cur_idx % len(images)], (0, 0))
 
     def run(self):
         log("KitchenCar POP Signage 起動")
-        while True:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit()
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
+        try:
+            while True:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
                         pygame.quit()
                         sys.exit()
-                    if event.key == pygame.K_q:
-                        # Mac等、GPIOボタンが無い環境での動作確認用
-                        self.show_qr_code()
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE:
+                            pygame.quit()
+                            sys.exit()
+                        if event.key == pygame.K_q:
+                            # Mac等、GPIOボタンが無い環境での動作確認用
+                            self.show_qr_code()
 
-            now = time.time()
-            if now - self.last_scan_time >= RESCAN_INTERVAL:
-                self.last_scan_time = now
-                self.load_pop_images()
+                now = time.time()
+                if now - self.last_scan_time >= RESCAN_INTERVAL:
+                    self.last_scan_time = now
+                    self.load_pop_images()
 
-            self.draw_pop_mode()
-            if self.qr_active:
-                self.draw_qr_overlay()
+                self.draw_pop_mode()
+                if self.qr_active:
+                    self.draw_qr_overlay()
 
-            pygame.display.flip()
-            self.clock.tick(FPS)
+                if ROTATE_SCREEN:
+                    # pygame.transform.rotateは反時計回りが正の角度なので、
+                    # 「時計回りにROTATE_SCREEN度」は -ROTATE_SCREEN を渡す
+                    rotated = pygame.transform.rotate(self.canvas, -ROTATE_SCREEN)
+                    self.screen.blit(rotated, (0, 0))
+                else:
+                    self.screen.blit(self.canvas, (0, 0))
+
+                pygame.display.flip()
+                self.clock.tick(FPS)
+        except KeyboardInterrupt:
+            log("Ctrl+Cを検知、終了します")
+            pygame.quit()
+            sys.exit(0)
 
 
 if __name__ == "__main__":
