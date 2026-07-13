@@ -89,7 +89,7 @@ class PopSignage:
         self.current_pop_index = 0
         self.next_pop_index = 0
         self.pop_start_time = time.time()
-        self.transition_alpha = 255
+        self.transition_start_time = 0
         self.in_transition = False
         self.last_scan_time = 0
 
@@ -327,18 +327,25 @@ class PopSignage:
             self.in_transition = True
             self.next_pop_index = (cur_idx + 1) % len(images)
             next_idx = self.next_pop_index
-            self.transition_alpha = 255
+            self.transition_start_time = now
 
         if self.in_transition:
-            self.transition_alpha -= (255 / (TRANSITION_DURATION * FPS))
+            # 実フレームレートに関わらず、指定した秒数ちょうどで切り替わるよう
+            # 実経過時間を基準にアルファ値を計算する（フレーム数基準だと、
+            # 非力な機器で実際のFPSが落ちた時に想定より大幅に長くなってしまうため）
+            trans_elapsed = now - self.transition_start_time
+            progress = min(trans_elapsed / TRANSITION_DURATION, 1.0)
+            alpha = int(255 * (1 - progress))
+
             self.canvas.blit(images[next_idx % len(images)], (0, 0))
-            fading_out = images[cur_idx % len(images)].copy()
-            fading_out.set_alpha(max(0, int(self.transition_alpha)))
+            fading_out = images[cur_idx % len(images)]
+            fading_out.set_alpha(alpha)
             self.canvas.blit(fading_out, (0, 0))
-            if self.transition_alpha <= 0:
-                self.transition_alpha = 255
+            fading_out.set_alpha(255)  # 次回の通常表示に備えて不透明に戻す
+
+            if progress >= 1.0:
                 self.current_pop_index = next_idx
-                self.pop_start_time = time.time()
+                self.pop_start_time = now
                 self.in_transition = False
         else:
             self.canvas.blit(images[cur_idx % len(images)], (0, 0))
