@@ -7,7 +7,7 @@
 SCREEN_WIDTH = 400
 SCREEN_HEIGHT = 700
 FPS = 60
-FULLSCREEN = False       # Pi実機ではTrueにする
+FULLSCREEN = True        # Pi実機ではTrue。Macでウィンドウ表示させたい時だけFalseにする
 
 # 画面回転（縦置き設置用）
 # 0   = 回転なし（横のまま）
