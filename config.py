@@ -7,13 +7,20 @@
 SCREEN_WIDTH = 400
 SCREEN_HEIGHT = 700
 FPS = 60
-FULLSCREEN = False       # Pi実機ではTrueにする
-ROTATE_SCREEN = False    # 縦置き設置で画面自体が90度回転している場合はTrue
+FULLSCREEN = True       # Pi実機ではTrueにする
+
+# 画面回転（縦置き設置用）
+# 0   = 回転なし（横のまま）
+# 90  = 時計回りに90度回転（画面右側が上になる向きで物理設置している場合）
+# 180 = 180度回転
+# 270 = 反時計回りに90度回転（画面左側が上になる向きで物理設置している場合）
+# 実機に取り付けてから、上下が正しくなる値を探して設定してください
+ROTATE_SCREEN = 90
 
 # POP画像設定
 IMAGE_FOLDER = "./images"
 IMAGE_INTERVAL = 12          # 1枚あたりの表示秒数
-TRANSITION_DURATION = 1.0    # クロスフェード時間（秒）
+TRANSITION_DURATION = 0.5    # クロスフェード時間（秒）
 RESCAN_INTERVAL = 5           # 画像フォルダの再スキャン間隔（秒）※iPhoneからのアップロード/表示切替を自動反映
 
 # 画像の表示方式
