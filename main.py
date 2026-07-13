@@ -152,12 +152,16 @@ class PopSignage:
     def _fit_image(img, w, h):
         """IMAGE_FIT_MODEに応じて画像をスケーリングし、画面サイズのSurfaceを返す。
         contain: 画像全体が欠けずに収まるよう縮小し、余白はBG_COLORで塗る
-        cover  : 画面いっぱいに敷き詰め、はみ出た部分はトリミングする"""
+        cover  : 画面いっぱいに敷き詰め、はみ出た部分はトリミングする
+        stretch: アスペクト比を無視して画面ぴったりに引き伸ばす（余白・トリミングなし）"""
         iw, ih = img.get_size()
         canvas = pygame.Surface((w, h))
         canvas.fill(BG_COLOR)
 
-        if IMAGE_FIT_MODE == "cover":
+        if IMAGE_FIT_MODE == "stretch":
+            scaled = pygame.transform.smoothscale(img, (w, h))
+            canvas.blit(scaled, (0, 0))
+        elif IMAGE_FIT_MODE == "cover":
             scale = max(w / iw, h / ih)
             new_size = (int(iw * scale), int(ih * scale))
             scaled = pygame.transform.smoothscale(img, new_size)

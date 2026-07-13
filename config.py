@@ -7,7 +7,7 @@
 SCREEN_WIDTH = 400
 SCREEN_HEIGHT = 700
 FPS = 60
-FULLSCREEN = True       # Pi実機ではTrueにする
+FULLSCREEN = False       # Pi実機ではTrueにする
 
 # 画面回転（縦置き設置用）
 # 0   = 回転なし（横のまま）
@@ -24,10 +24,11 @@ TRANSITION_DURATION = 0.5    # クロスフェード時間（秒）
 RESCAN_INTERVAL = 5           # 画像フォルダの再スキャン間隔（秒）※iPhoneからのアップロード/表示切替を自動反映
 
 # 画像の表示方式
+#   "stretch" = アスペクト比を無視して画面ぴったりに引き伸ばす（余白・トリミングなし）
 #   "contain" = 画像全体が欠けずに収まるよう縮小（余白は下のBG_COLORで塗る）
 #   "cover"   = 画面いっぱいに敷き詰め、はみ出た部分はトリミング
-IMAGE_FIT_MODE = "contain"
-BG_COLOR = (0, 0, 0)         # containモード時の余白（黒帯）の色
+IMAGE_FIT_MODE = "stretch"
+BG_COLOR = (0, 0, 0)         # contain/coverモードで余白が出た場合の色
 
 # ワイヤレスアップロードサーバー設定
 UPLOAD_ENABLED = True
