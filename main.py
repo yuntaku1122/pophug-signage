@@ -1,8 +1,6 @@
 # ============================================
 # KitchenCar POP Signage - main.py
-# Version: 3.0.0
-# 方針転換: QR決済表示をやめ、POP画像スライドショー専用の
-#           ポータブルデジタルサイネージに変更
+# バージョンは version.py で一元管理（このファイルには書かない）
 # ============================================
 
 import os
@@ -16,6 +14,7 @@ import threading
 from datetime import datetime
 from config import *
 from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime
+from version import __version__
 
 try:
     import qrcode
@@ -79,7 +78,7 @@ class PopSignage:
         else:
             self.canvas = pygame.Surface((sw, sh))
 
-        pygame.display.set_caption("KitchenCar POP Signage")
+        pygame.display.set_caption(f"KitchenCar POP Signage v{__version__}")
         self.clock = pygame.time.Clock()
         self.font_medium = get_japanese_font(36)
         self.font_small = get_japanese_font(24)
@@ -386,7 +385,7 @@ class PopSignage:
             self.canvas.blit(images[cur_idx % len(images)], (0, 0))
 
     def run(self):
-        log("KitchenCar POP Signage 起動")
+        log(f"KitchenCar POP Signage v{__version__} 起動")
         try:
             while True:
                 for event in pygame.event.get():
@@ -444,5 +443,8 @@ class PopSignage:
 
 
 if __name__ == "__main__":
+    if "--version" in sys.argv or "-v" in sys.argv:
+        print(f"KitchenCar POP Signage v{__version__}")
+        sys.exit(0)
     app = PopSignage()
     app.run()

@@ -35,6 +35,11 @@ except ImportError:
     DEFAULT_TRANSITION_DURATION = 0.5
 
 try:
+    from version import __version__
+except ImportError:
+    __version__ = "unknown"
+
+try:
     from flask import Flask, request, redirect, send_from_directory
 except ImportError:
     Flask = None
@@ -77,6 +82,7 @@ UPLOAD_PAGE = """
   .setting-row label { font-size:14px; color:#333; display:flex; justify-content:space-between; }
   .setting-row input[type=range] { width:100%; margin:10px 0 4px; accent-color:#228b22; }
   .setting-status { font-size:12px; color:#999; min-height:16px; }
+  .version-footer { text-align:center; font-size:11px; color:#bbb; margin:28px 0 8px; }
 </style>
 </head>
 <body>
@@ -174,6 +180,8 @@ UPLOAD_PAGE = """
     });
   })();
   </script>
+
+  <p class="version-footer">KitchenCar POP Signage v__VERSION__</p>
 </body>
 </html>
 """
@@ -228,7 +236,8 @@ def create_app(image_folder):
                 .replace("__VISIBLE_COUNT__", str(visible_count))
                 .replace("__RESCAN_SEC__", str(RESCAN_INTERVAL))
                 .replace("__TRANSITION_DURATION__", transition_duration)
-                .replace("__GALLERY__", gallery_html))
+                .replace("__GALLERY__", gallery_html)
+                .replace("__VERSION__", __version__))
         return html
 
     @app.route("/img/<path:filename>")
