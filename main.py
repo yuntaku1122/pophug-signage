@@ -119,9 +119,10 @@ class PopSignage:
 
     def _apply_settings(self):
         """images/.settings.json の内容を読み込み、実行中の設定（TRANSITION_DURATION・
-        ROTATE_SCREENなど）に反映する。Web側の操作で変更された値をここで取り込む。"""
+        IMAGE_INTERVAL・ROTATE_SCREENなど）に反映する。Web側の操作で変更された値をここで取り込む。"""
         settings = load_settings(IMAGE_FOLDER, {
             "transition_duration": TRANSITION_DURATION,
+            "image_interval": IMAGE_INTERVAL,
             "rotation": ROTATE_SCREEN,
         })
 
@@ -129,6 +130,11 @@ class PopSignage:
         if new_duration != globals().get("TRANSITION_DURATION"):
             globals()["TRANSITION_DURATION"] = new_duration
             log(f"トランジション時間を更新: {new_duration}秒")
+
+        new_interval = settings.get("image_interval", IMAGE_INTERVAL)
+        if new_interval != globals().get("IMAGE_INTERVAL"):
+            globals()["IMAGE_INTERVAL"] = new_interval
+            log(f"画像切り替え時間を更新: {new_interval}秒")
 
         new_rotation = settings.get("rotation", ROTATE_SCREEN)
         if new_rotation != globals().get("ROTATE_SCREEN"):

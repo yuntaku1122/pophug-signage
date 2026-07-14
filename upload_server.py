@@ -35,6 +35,11 @@ except ImportError:
     DEFAULT_TRANSITION_DURATION = 0.5
 
 try:
+    from config import IMAGE_INTERVAL as DEFAULT_IMAGE_INTERVAL
+except ImportError:
+    DEFAULT_IMAGE_INTERVAL = 12
+
+try:
     from config import ROTATE_SCREEN as DEFAULT_ROTATION
 except ImportError:
     DEFAULT_ROTATION = 0
@@ -118,9 +123,14 @@ UPLOAD_PAGE = """
   <div class="box" style="margin-top:24px;">
     <h1>表示設定</h1>
     <div class="setting-row">
-      <label>画面切り替えの速さ <span id="transition-value">__TRANSITION_DURATION__</span>秒</label>
+      <label>画面切り替えの速さ（トランジションの時間） <span id="transition-value">__TRANSITION_DURATION__</span>秒</label>
       <input type="range" id="transition-slider" min="0.2" max="2.0" step="0.1" value="__TRANSITION_DURATION__">
       <p class="setting-status" id="transition-status"></p>
+    </div>
+    <div class="setting-row">
+      <label>画面切り替えの時間（1枚あたりの表示時間） <span id="interval-value">__IMAGE_INTERVAL__</span>秒</label>
+      <input type="range" id="interval-slider" min="3" max="30" step="1" value="__IMAGE_INTERVAL__">
+      <p class="setting-status" id="interval-status"></p>
     </div>
   </div>
 
@@ -172,19 +182,19 @@ UPLOAD_PAGE = """
   </script>
 
   <script>
-  (function () {
-    var slider = document.getElementById('transition-slider');
-    var valueLabel = document.getElementById('transition-value');
-    var status = document.getElementById('transition-status');
+  function setupSlider(sliderId, valueId, statusId, fieldName, decimals) {
+    var slider = document.getElementById(sliderId);
+    var valueLabel = document.getElementById(valueId);
+    var status = document.getElementById(statusId);
 
     // ドラッグ中は数値表示だけ更新（通信は発生させない）
     slider.addEventListener('input', function () {
-      valueLabel.textContent = parseFloat(this.value).toFixed(1);
+      valueLabel.textContent = parseFloat(this.value).toFixed(decimals);
     });
 
     // 指を離した(値が確定した)タイミングで保存する
     slider.addEventListener('change', function () {
-      var val = parseFloat(this.value).toFixed(1);
+      var val = parseFloat(this.value).toFixed(decimals);
       status.textContent = '保存中...';
 
       fetch('/settings', {
@@ -193,18 +203,21 @@ UPLOAD_PAGE = """
           'Content-Type': 'application/x-www-form-urlencoded',
           'Accept': 'application/json'
         },
-        body: 'transition_duration=' + encodeURIComponent(val)
+        body: fieldName + '=' + encodeURIComponent(val)
       })
         .then(function (r) { return r.json(); })
         .then(function (data) {
-          valueLabel.textContent = parseFloat(data.transition_duration).toFixed(1);
+          valueLabel.textContent = parseFloat(data[fieldName]).toFixed(decimals);
           status.textContent = '保存しました（サイネージには数秒で反映されます）';
         })
         .catch(function () {
           status.textContent = '保存に失敗しました';
         });
     });
-  })();
+  }
+
+  setupSlider('transition-slider', 'transition-value', 'transition-status', 'transition_duration', 1);
+  setupSlider('interval-slider', 'interval-value', 'interval-status', 'image_interval', 0);
   </script>
 
   <script>
@@ -295,9 +308,11 @@ def create_app(image_folder):
 
         settings = signage_state.load_settings(image_folder, {
             "transition_duration": DEFAULT_TRANSITION_DURATION,
+            "image_interval": DEFAULT_IMAGE_INTERVAL,
             "rotation": DEFAULT_ROTATION,
         })
         transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
+        image_interval = int(round(float(settings.get("image_interval", DEFAULT_IMAGE_INTERVAL))))
         rotation = int(settings.get("rotation", DEFAULT_ROTATION)) % 360
 
         html = (UPLOAD_PAGE
@@ -306,6 +321,7 @@ def create_app(image_folder):
                 .replace("__VISIBLE_COUNT__", str(visible_count))
                 .replace("__RESCAN_SEC__", str(RESCAN_INTERVAL))
                 .replace("__TRANSITION_DURATION__", transition_duration)
+                .replace("__IMAGE_INTERVAL__", str(image_interval))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__GALLERY__", gallery_html)
                 .replace("__VERSION__", __version__))
@@ -330,22 +346,34 @@ def create_app(image_folder):
 
     @app.route("/settings", methods=["POST"])
     def update_settings():
-        try:
-            duration = float(request.form.get("transition_duration"))
-        except (TypeError, ValueError):
-            return {"error": "invalid transition_duration"}, 400
+        updates = {}
 
-        # 想定外の値が来ても安全なようにクランプしておく
-        duration = round(max(0.1, min(duration, 5.0)), 1)
+        if "transition_duration" in request.form:
+            try:
+                duration = float(request.form.get("transition_duration"))
+            except (TypeError, ValueError):
+                return {"error": "invalid transition_duration"}, 400
+            updates["transition_duration"] = round(max(0.1, min(duration, 5.0)), 1)
 
-        signage_state.save_settings(
-            image_folder,
-            {"transition_duration": duration},
-            defaults={"transition_duration": DEFAULT_TRANSITION_DURATION},
-        )
+        if "image_interval" in request.form:
+            try:
+                interval = float(request.form.get("image_interval"))
+            except (TypeError, ValueError):
+                return {"error": "invalid image_interval"}, 400
+            updates["image_interval"] = round(max(2.0, min(interval, 60.0)), 1)
+
+        if not updates:
+            return {"error": "no valid fields"}, 400
+
+        defaults = {
+            "transition_duration": DEFAULT_TRANSITION_DURATION,
+            "image_interval": DEFAULT_IMAGE_INTERVAL,
+            "rotation": DEFAULT_ROTATION,
+        }
+        result = signage_state.save_settings(image_folder, updates, defaults=defaults)
 
         if request.headers.get("Accept") == "application/json":
-            return {"transition_duration": duration}, 200
+            return {k: result[k] for k in updates}, 200
 
         return redirect("/")
 
