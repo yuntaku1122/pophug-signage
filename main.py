@@ -15,7 +15,7 @@ import io
 import threading
 from datetime import datetime
 from config import *
-from signage_state import load_hidden
+from signage_state import load_hidden, hidden_mtime
 
 try:
     import qrcode
@@ -85,6 +85,7 @@ class PopSignage:
         self.font_small = get_japanese_font(24)
 
         self.pop_images = []          # 表示用にスケール済みSurfaceのリスト
+        self._image_cache = {}        # ファイル名 -> スケール済みSurface（変更が無ければ再利用）
         self._image_mtimes = {}       # ファイル名 -> mtime（再スキャン判定用）
         self.current_pop_index = 0
         self.next_pop_index = 0
@@ -92,6 +93,8 @@ class PopSignage:
         self.transition_start_time = 0
         self.in_transition = False
         self.last_scan_time = 0
+        self.last_hidden_check_time = 0
+        self.last_hidden_mtime = hidden_mtime(IMAGE_FOLDER)
 
         self.qr_active = False        # QRコードオーバーレイの表示中フラグ
         self.qr_hide_time = 0
@@ -128,18 +131,25 @@ class PopSignage:
 
         w = self.canvas.get_width()
         h = self.canvas.get_height()
-        new_images = []
+        new_cache = {}
         for f in files:
+            if f in self._image_cache and self._image_mtimes.get(f) == mtimes[f]:
+                # ファイル自体は変わっていない（表示/非表示の切替だけ）ので再デコードしない
+                new_cache[f] = self._image_cache[f]
+                continue
             path = os.path.join(IMAGE_FOLDER, f)
             try:
                 img = pygame.image.load(path).convert()
                 img = self._fit_image(img, w, h)
-                new_images.append(img)
+                new_cache[f] = img
             except Exception as e:
                 log(f"画像読み込みエラー: {f} - {e}")
 
+        new_images = [new_cache[f] for f in files if f in new_cache]
+
         with self._lock:
             self.pop_images = new_images
+            self._image_cache = new_cache
             self._image_mtimes = mtimes
             if self.current_pop_index >= len(self.pop_images):
                 self.current_pop_index = 0
@@ -213,16 +223,24 @@ class PopSignage:
     # ---------------- QRコード表示ボタン ----------------
 
     def setup_qr_button(self):
-        """外付けボタンを押すとアップロードページのQRコードを表示する。
+        """外付けボタンを押すとアップロードページのQRコードを表示/非表示をトグルする。
         ラズパイ実機ではGPIOボタン、Mac等GPIOが無い環境ではQキーで代用する。"""
         try:
             from gpiozero import Button
             button = Button(QR_BUTTON_GPIO_PIN, pull_up=True, bounce_time=0.2)
-            button.when_pressed = self.show_qr_code
+            button.when_pressed = self.toggle_qr_code
             self._qr_button = button  # ガベージコレクトされないよう保持
             log(f"QRボタン待受け開始（GPIO{QR_BUTTON_GPIO_PIN}）")
         except Exception as e:
             log(f"GPIOボタンが利用できません（{e}）。代わりにキーボードの[Q]キーでQR表示できます")
+
+    def toggle_qr_code(self):
+        """QR表示中にもう一度押されたら即座に消す。非表示中なら新たに表示する。"""
+        if self.qr_active:
+            self.qr_active = False
+            log("QRコード非表示（ボタン再押下）")
+        else:
+            self.show_qr_code()
 
     def show_qr_code(self):
         """アップロードページのURLをQRコードとして生成し、画面に一定時間オーバーレイ表示する"""
@@ -368,9 +386,20 @@ class PopSignage:
                             sys.exit()
                         if event.key == pygame.K_q:
                             # Mac等、GPIOボタンが無い環境での動作確認用
-                            self.show_qr_code()
+                            self.toggle_qr_code()
 
                 now = time.time()
+
+                # 表示/非表示の切替は、状態ファイルの更新時刻だけを軽くチェックして
+                # 即座に反映する（フォルダ全体の再スキャンより高頻度・低負荷）
+                if now - self.last_hidden_check_time >= HIDDEN_CHECK_INTERVAL:
+                    self.last_hidden_check_time = now
+                    current_mtime = hidden_mtime(IMAGE_FOLDER)
+                    if current_mtime != self.last_hidden_mtime:
+                        self.last_hidden_mtime = current_mtime
+                        self.load_pop_images()
+                        self.last_scan_time = now
+
                 if now - self.last_scan_time >= RESCAN_INTERVAL:
                     self.last_scan_time = now
                     self.load_pop_images()

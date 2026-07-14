@@ -45,3 +45,13 @@ def toggle_hidden(image_folder, filename):
         hidden.add(filename)
     save_hidden(image_folder, hidden)
     return hidden
+
+
+def hidden_mtime(image_folder):
+    """状態ファイルの更新時刻だけを返す（存在しなければNone）。
+    中身を読まずstat()するだけなので、高頻度に呼んでも軽い。"""
+    path = _state_path(image_folder)
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None

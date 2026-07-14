@@ -21,7 +21,8 @@ ROTATE_SCREEN = 90
 IMAGE_FOLDER = "./images"
 IMAGE_INTERVAL = 12          # 1枚あたりの表示秒数
 TRANSITION_DURATION = 0.5    # クロスフェード時間（秒）
-RESCAN_INTERVAL = 5           # 画像フォルダの再スキャン間隔（秒）※iPhoneからのアップロード/表示切替を自動反映
+RESCAN_INTERVAL = 5           # 画像フォルダの再スキャン間隔（秒）※新規アップロードの検知用
+HIDDEN_CHECK_INTERVAL = 1     # 表示/非表示の切替を検知する間隔（秒）※軽い処理なので短くしてある
 
 # 画像の表示方式
 #   "stretch" = アスペクト比を無視して画面ぴったりに引き伸ばす（余白・トリミングなし）
