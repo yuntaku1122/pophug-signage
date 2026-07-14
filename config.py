@@ -21,6 +21,7 @@ ROTATE_SCREEN = 90
 IMAGE_FOLDER = "./images"
 IMAGE_INTERVAL = 12          # 1枚あたりの表示秒数
 TRANSITION_DURATION = 0.5    # クロスフェード時間（秒）
+TRANSITION_TYPE = "fade"     # 切り替え効果: fade / slide_left / slide_right / slide_up / slide_down
 RESCAN_INTERVAL = 5           # 画像フォルダの再スキャン間隔（秒）※新規アップロードの検知用
 HIDDEN_CHECK_INTERVAL = 1     # 表示/非表示の切替を検知する間隔（秒）※軽い処理なので短くしてある
 

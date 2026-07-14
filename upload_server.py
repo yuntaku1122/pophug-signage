@@ -40,6 +40,19 @@ except ImportError:
     DEFAULT_IMAGE_INTERVAL = 12
 
 try:
+    from config import TRANSITION_TYPE as DEFAULT_TRANSITION_TYPE
+except ImportError:
+    DEFAULT_TRANSITION_TYPE = "fade"
+
+TRANSITION_TYPE_LABELS = {
+    "fade": "フェード（じわっと重なる）",
+    "slide_left": "左にスワイプ（右→左）",
+    "slide_right": "右にスワイプ（左→右）",
+    "slide_up": "上にスワイプ（下→上）",
+    "slide_down": "下にスワイプ（上→下）",
+}
+
+try:
     from config import ROTATE_SCREEN as DEFAULT_ROTATION
 except ImportError:
     DEFAULT_ROTATION = 0
@@ -91,6 +104,8 @@ UPLOAD_PAGE = """
   .setting-row { margin-top:16px; }
   .setting-row label { font-size:14px; color:#333; display:flex; justify-content:space-between; }
   .setting-row input[type=range] { width:100%; margin:10px 0 4px; accent-color:#228b22; }
+  .setting-row select { width:100%; padding:10px; border-radius:8px; border:1px solid #ccc;
+                         font-size:15px; margin-top:8px; background:#fff; }
   .setting-status { font-size:12px; color:#999; min-height:16px; }
   .rotate-preview-row { display:flex; justify-content:center; margin:16px 0; }
   .rotate-preview { width:40px; height:66px; border:3px solid #228b22; border-radius:5px;
@@ -131,6 +146,13 @@ UPLOAD_PAGE = """
       <label>画面切り替えの時間（1枚あたりの表示時間） <span id="interval-value">__IMAGE_INTERVAL__</span>秒</label>
       <input type="range" id="interval-slider" min="3" max="30" step="1" value="__IMAGE_INTERVAL__">
       <p class="setting-status" id="interval-status"></p>
+    </div>
+    <div class="setting-row">
+      <label>画面切り替えの種類</label>
+      <select id="transition-type-select">
+        __TRANSITION_TYPE_OPTIONS__
+      </select>
+      <p class="setting-status" id="transition-type-status"></p>
     </div>
   </div>
 
@@ -218,6 +240,34 @@ UPLOAD_PAGE = """
 
   setupSlider('transition-slider', 'transition-value', 'transition-status', 'transition_duration', 1);
   setupSlider('interval-slider', 'interval-value', 'interval-status', 'image_interval', 0);
+
+  function setupSelect(selectId, statusId, fieldName) {
+    var select = document.getElementById(selectId);
+    var status = document.getElementById(statusId);
+
+    select.addEventListener('change', function () {
+      var val = this.value;
+      status.textContent = '保存中...';
+
+      fetch('/settings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: fieldName + '=' + encodeURIComponent(val)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          status.textContent = '保存しました（サイネージには数秒で反映されます）';
+        })
+        .catch(function () {
+          status.textContent = '保存に失敗しました';
+        });
+    });
+  }
+
+  setupSelect('transition-type-select', 'transition-type-status', 'transition_type');
   </script>
 
   <script>
@@ -285,6 +335,14 @@ def render_gallery_item(filename, is_hidden):
     """
 
 
+def render_transition_type_options(current):
+    opts = []
+    for value, label in TRANSITION_TYPE_LABELS.items():
+        selected = " selected" if value == current else ""
+        opts.append(f'<option value="{value}"{selected}>{label}</option>')
+    return "".join(opts)
+
+
 def create_app(image_folder):
     if Flask is None:
         raise RuntimeError("Flaskがインストールされていません。 pip install flask を実行してください。")
@@ -309,10 +367,12 @@ def create_app(image_folder):
         settings = signage_state.load_settings(image_folder, {
             "transition_duration": DEFAULT_TRANSITION_DURATION,
             "image_interval": DEFAULT_IMAGE_INTERVAL,
+            "transition_type": DEFAULT_TRANSITION_TYPE,
             "rotation": DEFAULT_ROTATION,
         })
         transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
         image_interval = int(round(float(settings.get("image_interval", DEFAULT_IMAGE_INTERVAL))))
+        transition_type = settings.get("transition_type", DEFAULT_TRANSITION_TYPE)
         rotation = int(settings.get("rotation", DEFAULT_ROTATION)) % 360
 
         html = (UPLOAD_PAGE
@@ -322,6 +382,7 @@ def create_app(image_folder):
                 .replace("__RESCAN_SEC__", str(RESCAN_INTERVAL))
                 .replace("__TRANSITION_DURATION__", transition_duration)
                 .replace("__IMAGE_INTERVAL__", str(image_interval))
+                .replace("__TRANSITION_TYPE_OPTIONS__", render_transition_type_options(transition_type))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__GALLERY__", gallery_html)
                 .replace("__VERSION__", __version__))
@@ -362,12 +423,19 @@ def create_app(image_folder):
                 return {"error": "invalid image_interval"}, 400
             updates["image_interval"] = round(max(2.0, min(interval, 60.0)), 1)
 
+        if "transition_type" in request.form:
+            ttype = request.form.get("transition_type")
+            if ttype not in TRANSITION_TYPE_LABELS:
+                return {"error": "invalid transition_type"}, 400
+            updates["transition_type"] = ttype
+
         if not updates:
             return {"error": "no valid fields"}, 400
 
         defaults = {
             "transition_duration": DEFAULT_TRANSITION_DURATION,
             "image_interval": DEFAULT_IMAGE_INTERVAL,
+            "transition_type": DEFAULT_TRANSITION_TYPE,
             "rotation": DEFAULT_ROTATION,
         }
         result = signage_state.save_settings(image_folder, updates, defaults=defaults)

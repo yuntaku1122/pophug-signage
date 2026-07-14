@@ -123,6 +123,7 @@ class PopSignage:
         settings = load_settings(IMAGE_FOLDER, {
             "transition_duration": TRANSITION_DURATION,
             "image_interval": IMAGE_INTERVAL,
+            "transition_type": TRANSITION_TYPE,
             "rotation": ROTATE_SCREEN,
         })
 
@@ -135,6 +136,11 @@ class PopSignage:
         if new_interval != globals().get("IMAGE_INTERVAL"):
             globals()["IMAGE_INTERVAL"] = new_interval
             log(f"画像切り替え時間を更新: {new_interval}秒")
+
+        new_type = settings.get("transition_type", TRANSITION_TYPE)
+        if new_type != globals().get("TRANSITION_TYPE"):
+            globals()["TRANSITION_TYPE"] = new_type
+            log(f"トランジションの種類を更新: {new_type}")
 
         new_rotation = settings.get("rotation", ROTATE_SCREEN)
         if new_rotation != globals().get("ROTATE_SCREEN"):
@@ -395,17 +401,13 @@ class PopSignage:
 
         if self.in_transition:
             # 実フレームレートに関わらず、指定した秒数ちょうどで切り替わるよう
-            # 実経過時間を基準にアルファ値を計算する（フレーム数基準だと、
+            # 実経過時間を基準にprogressを計算する（フレーム数基準だと、
             # 非力な機器で実際のFPSが落ちた時に想定より大幅に長くなってしまうため）
             trans_elapsed = now - self.transition_start_time
             progress = min(trans_elapsed / TRANSITION_DURATION, 1.0)
-            alpha = int(255 * (1 - progress))
 
-            self.canvas.blit(images[next_idx % len(images)], (0, 0))
-            fading_out = images[cur_idx % len(images)]
-            fading_out.set_alpha(alpha)
-            self.canvas.blit(fading_out, (0, 0))
-            fading_out.set_alpha(255)  # 次回の通常表示に備えて不透明に戻す
+            self._draw_transition_frame(
+                images[cur_idx % len(images)], images[next_idx % len(images)], progress)
 
             if progress >= 1.0:
                 self.current_pop_index = next_idx
@@ -413,6 +415,42 @@ class PopSignage:
                 self.in_transition = False
         else:
             self.canvas.blit(images[cur_idx % len(images)], (0, 0))
+
+    def _draw_transition_frame(self, current_img, next_img, progress):
+        """TRANSITION_TYPEに応じた切り替え効果を1フレーム分描画する。
+        fade      : じわっと重なるクロスフェード
+        slide_left : スマホのスワイプのように右→左へスライド
+        slide_right: 左→右へスライド
+        slide_up   : 下→上へスライド
+        slide_down : 上→下へスライド
+        いずれもSurfaceのコピーを作らず位置指定のblitだけで実現しているので、
+        Pi Zero 2Wのような非力な機器でも軽い。"""
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
+        ttype = TRANSITION_TYPE
+
+        if ttype == "slide_left":
+            offset = int(w * progress)
+            self.canvas.blit(current_img, (-offset, 0))
+            self.canvas.blit(next_img, (w - offset, 0))
+        elif ttype == "slide_right":
+            offset = int(w * progress)
+            self.canvas.blit(current_img, (offset, 0))
+            self.canvas.blit(next_img, (offset - w, 0))
+        elif ttype == "slide_up":
+            offset = int(h * progress)
+            self.canvas.blit(current_img, (0, -offset))
+            self.canvas.blit(next_img, (0, h - offset))
+        elif ttype == "slide_down":
+            offset = int(h * progress)
+            self.canvas.blit(current_img, (0, offset))
+            self.canvas.blit(next_img, (0, offset - h))
+        else:  # "fade"（未知の値が来た場合もここにフォールバック）
+            alpha = int(255 * (1 - progress))
+            self.canvas.blit(next_img, (0, 0))
+            current_img.set_alpha(alpha)
+            self.canvas.blit(current_img, (0, 0))
+            current_img.set_alpha(255)  # 次回の通常表示に備えて不透明に戻す
 
     def run(self):
         log(f"KitchenCar POP Signage v{__version__} 起動")
