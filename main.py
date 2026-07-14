@@ -94,8 +94,9 @@ class PopSignage:
         self.last_scan_time = 0
         self.last_hidden_check_time = 0
         self.last_hidden_mtime = hidden_mtime(IMAGE_FOLDER)
+        self._lock = threading.Lock()
 
-        # Web側で変更されたトランジション時間などの設定を読み込んで反映
+        # Web側で変更されたトランジション時間・画面回転などの設定を読み込んで反映
         self.last_settings_mtime = settings_mtime(IMAGE_FOLDER)
         self._apply_settings()
 
@@ -106,7 +107,6 @@ class PopSignage:
         self.qr_url_surface = None
         self.qr_url = ""
 
-        self._lock = threading.Lock()
         self.load_pop_images(initial=True)
 
         if UPLOAD_ENABLED:
@@ -118,13 +118,37 @@ class PopSignage:
     # ---------------- 画像読み込み ----------------
 
     def _apply_settings(self):
-        """images/.settings.json の内容を読み込み、実行中の設定（TRANSITION_DURATIONなど）に反映する。
-        Web側のスライダーで変更された値をここで取り込む。"""
-        settings = load_settings(IMAGE_FOLDER, {"transition_duration": TRANSITION_DURATION})
+        """images/.settings.json の内容を読み込み、実行中の設定（TRANSITION_DURATION・
+        ROTATE_SCREENなど）に反映する。Web側の操作で変更された値をここで取り込む。"""
+        settings = load_settings(IMAGE_FOLDER, {
+            "transition_duration": TRANSITION_DURATION,
+            "rotation": ROTATE_SCREEN,
+        })
+
         new_duration = settings.get("transition_duration", TRANSITION_DURATION)
         if new_duration != globals().get("TRANSITION_DURATION"):
             globals()["TRANSITION_DURATION"] = new_duration
             log(f"トランジション時間を更新: {new_duration}秒")
+
+        new_rotation = settings.get("rotation", ROTATE_SCREEN)
+        if new_rotation != globals().get("ROTATE_SCREEN"):
+            globals()["ROTATE_SCREEN"] = new_rotation
+            log(f"画面回転を更新: {new_rotation}度")
+            self._rebuild_canvas()
+
+    def _rebuild_canvas(self):
+        """ROTATE_SCREENの変更を受けて、描画キャンバスを作り直す。
+        縦横比が変わるため、キャッシュ済みの画像も破棄して新サイズで再生成させる。"""
+        sw, sh = self.screen.get_width(), self.screen.get_height()
+        if ROTATE_SCREEN in (90, 270):
+            self.canvas = pygame.Surface((sh, sw))
+        else:
+            self.canvas = pygame.Surface((sw, sh))
+
+        with self._lock:
+            self._image_cache = {}
+            self._image_mtimes = {}
+        self.load_pop_images(initial=True)
 
     def load_pop_images(self, initial=False):
         """images/ フォルダを読み込み、新しい画像があれば反映する。

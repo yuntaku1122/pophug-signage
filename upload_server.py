@@ -35,6 +35,11 @@ except ImportError:
     DEFAULT_TRANSITION_DURATION = 0.5
 
 try:
+    from config import ROTATE_SCREEN as DEFAULT_ROTATION
+except ImportError:
+    DEFAULT_ROTATION = 0
+
+try:
     from version import __version__
 except ImportError:
     __version__ = "unknown"
@@ -82,6 +87,14 @@ UPLOAD_PAGE = """
   .setting-row label { font-size:14px; color:#333; display:flex; justify-content:space-between; }
   .setting-row input[type=range] { width:100%; margin:10px 0 4px; accent-color:#228b22; }
   .setting-status { font-size:12px; color:#999; min-height:16px; }
+  .rotate-preview-row { display:flex; justify-content:center; margin:16px 0; }
+  .rotate-preview { width:40px; height:66px; border:3px solid #228b22; border-radius:5px;
+                     transition:transform .3s; background:#f0f7f0; }
+  .rotate-row { display:flex; gap:10px; }
+  .rotate-row button { flex:1; background:#555; padding:14px; border:none; border-radius:8px;
+                        color:#fff; font-size:15px; }
+  .rotate-row button:active { background:#333; }
+  .rotation-current { text-align:center; font-size:14px; color:#333; margin-bottom:4px; }
   .version-footer { text-align:center; font-size:11px; color:#bbb; margin:28px 0 8px; }
 </style>
 </head>
@@ -109,6 +122,19 @@ UPLOAD_PAGE = """
       <input type="range" id="transition-slider" min="0.2" max="2.0" step="0.1" value="__TRANSITION_DURATION__">
       <p class="setting-status" id="transition-status"></p>
     </div>
+  </div>
+
+  <div class="box" style="margin-top:16px;">
+    <h1>画面の向き</h1>
+    <p class="rotation-current">現在の設定: <span id="rotation-value">__ROTATION__</span>度</p>
+    <div class="rotate-preview-row">
+      <div class="rotate-preview" id="rotation-preview" style="transform:rotate(__ROTATION__deg);"></div>
+    </div>
+    <div class="rotate-row">
+      <button type="button" id="rotate-left">⟲ 左に90度</button>
+      <button type="button" id="rotate-right">⟳ 右に90度</button>
+    </div>
+    <p class="setting-status" id="rotation-status"></p>
   </div>
 
   <script>
@@ -181,6 +207,47 @@ UPLOAD_PAGE = """
   })();
   </script>
 
+  <script>
+  (function () {
+    var valueLabel = document.getElementById('rotation-value');
+    var preview = document.getElementById('rotation-preview');
+    var status = document.getElementById('rotation-status');
+    var leftBtn = document.getElementById('rotate-left');
+    var rightBtn = document.getElementById('rotate-right');
+
+    function rotate(direction) {
+      leftBtn.disabled = true;
+      rightBtn.disabled = true;
+      status.textContent = '変更中...';
+
+      fetch('/rotate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'direction=' + direction
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          valueLabel.textContent = data.rotation;
+          preview.style.transform = 'rotate(' + data.rotation + 'deg)';
+          status.textContent = data.rotation + '度に設定しました（サイネージには数秒で反映されます）';
+        })
+        .catch(function () {
+          status.textContent = '変更に失敗しました';
+        })
+        .finally(function () {
+          leftBtn.disabled = false;
+          rightBtn.disabled = false;
+        });
+    }
+
+    leftBtn.addEventListener('click', function () { rotate('left'); });
+    rightBtn.addEventListener('click', function () { rotate('right'); });
+  })();
+  </script>
+
   <p class="version-footer">KitchenCar POP Signage v__VERSION__</p>
 </body>
 </html>
@@ -226,9 +293,12 @@ def create_app(image_folder):
         visible_count = len([f for f in files if f not in hidden])
         gallery_html = "".join(render_gallery_item(f, f in hidden) for f in reversed(files))
 
-        settings = signage_state.load_settings(
-            image_folder, {"transition_duration": DEFAULT_TRANSITION_DURATION})
+        settings = signage_state.load_settings(image_folder, {
+            "transition_duration": DEFAULT_TRANSITION_DURATION,
+            "rotation": DEFAULT_ROTATION,
+        })
         transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
+        rotation = int(settings.get("rotation", DEFAULT_ROTATION)) % 360
 
         html = (UPLOAD_PAGE
                 .replace("__MESSAGE__", message)
@@ -236,6 +306,7 @@ def create_app(image_folder):
                 .replace("__VISIBLE_COUNT__", str(visible_count))
                 .replace("__RESCAN_SEC__", str(RESCAN_INTERVAL))
                 .replace("__TRANSITION_DURATION__", transition_duration)
+                .replace("__ROTATION__", str(rotation))
                 .replace("__GALLERY__", gallery_html)
                 .replace("__VERSION__", __version__))
         return html
@@ -275,6 +346,30 @@ def create_app(image_folder):
 
         if request.headers.get("Accept") == "application/json":
             return {"transition_duration": duration}, 200
+
+        return redirect("/")
+
+    @app.route("/rotate", methods=["POST"])
+    def rotate():
+        direction = request.form.get("direction")
+        if direction not in ("left", "right"):
+            return {"error": "invalid direction"}, 400
+
+        current = signage_state.load_settings(
+            image_folder, {"rotation": DEFAULT_ROTATION}
+        ).get("rotation", DEFAULT_ROTATION)
+
+        delta = -90 if direction == "left" else 90
+        new_rotation = (int(current) + delta) % 360
+
+        signage_state.save_settings(
+            image_folder,
+            {"rotation": new_rotation},
+            defaults={"transition_duration": DEFAULT_TRANSITION_DURATION, "rotation": DEFAULT_ROTATION},
+        )
+
+        if request.headers.get("Accept") == "application/json":
+            return {"rotation": new_rotation}, 200
 
         return redirect("/")
 
