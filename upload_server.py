@@ -335,7 +335,7 @@ UPLOAD_PAGE = """
 
     btn.addEventListener('click', function () {
       var confirmed = window.confirm(
-        '本当にラズパイをシャットダウンしますか？\n' +
+        '本当にラズパイをシャットダウンしますか？\\n' +
         '電源を入れ直すまで、サイネージもこのアップロードページも使えなくなります。'
       );
       if (!confirmed) {
