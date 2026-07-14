@@ -30,6 +30,11 @@ except ImportError:
     RESCAN_INTERVAL = 10
 
 try:
+    from config import TRANSITION_DURATION as DEFAULT_TRANSITION_DURATION
+except ImportError:
+    DEFAULT_TRANSITION_DURATION = 0.5
+
+try:
     from flask import Flask, request, redirect, send_from_directory
 except ImportError:
     Flask = None
@@ -68,6 +73,10 @@ UPLOAD_PAGE = """
   .switch input:checked + .slider:before { transform:translateX(20px); }
   .switch-label { font-size:13px; color:#555; }
   .switch-label.is-updating { color:#bbb; }
+  .setting-row { margin-top:16px; }
+  .setting-row label { font-size:14px; color:#333; display:flex; justify-content:space-between; }
+  .setting-row input[type=range] { width:100%; margin:10px 0 4px; accent-color:#228b22; }
+  .setting-status { font-size:12px; color:#999; min-height:16px; }
 </style>
 </head>
 <body>
@@ -85,6 +94,15 @@ UPLOAD_PAGE = """
   <p class="hint">スイッチON＝サイネージに表示中。切り替えると即座に保存され、サイネージには最大__RESCAN_SEC__秒で反映されます。</p>
   <div class="gallery">
     __GALLERY__
+  </div>
+
+  <div class="box" style="margin-top:24px;">
+    <h1>表示設定</h1>
+    <div class="setting-row">
+      <label>画面切り替えの速さ <span id="transition-value">__TRANSITION_DURATION__</span>秒</label>
+      <input type="range" id="transition-slider" min="0.2" max="2.0" step="0.1" value="__TRANSITION_DURATION__">
+      <p class="setting-status" id="transition-status"></p>
+    </div>
   </div>
 
   <script>
@@ -119,6 +137,42 @@ UPLOAD_PAGE = """
         });
     });
   });
+  </script>
+
+  <script>
+  (function () {
+    var slider = document.getElementById('transition-slider');
+    var valueLabel = document.getElementById('transition-value');
+    var status = document.getElementById('transition-status');
+
+    // ドラッグ中は数値表示だけ更新（通信は発生させない）
+    slider.addEventListener('input', function () {
+      valueLabel.textContent = parseFloat(this.value).toFixed(1);
+    });
+
+    // 指を離した(値が確定した)タイミングで保存する
+    slider.addEventListener('change', function () {
+      var val = parseFloat(this.value).toFixed(1);
+      status.textContent = '保存中...';
+
+      fetch('/settings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'transition_duration=' + encodeURIComponent(val)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          valueLabel.textContent = parseFloat(data.transition_duration).toFixed(1);
+          status.textContent = '保存しました（サイネージには数秒で反映されます）';
+        })
+        .catch(function () {
+          status.textContent = '保存に失敗しました';
+        });
+    });
+  })();
   </script>
 </body>
 </html>
@@ -164,11 +218,16 @@ def create_app(image_folder):
         visible_count = len([f for f in files if f not in hidden])
         gallery_html = "".join(render_gallery_item(f, f in hidden) for f in reversed(files))
 
+        settings = signage_state.load_settings(
+            image_folder, {"transition_duration": DEFAULT_TRANSITION_DURATION})
+        transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
+
         html = (UPLOAD_PAGE
                 .replace("__MESSAGE__", message)
                 .replace("__COUNT__", str(len(files)))
                 .replace("__VISIBLE_COUNT__", str(visible_count))
                 .replace("__RESCAN_SEC__", str(RESCAN_INTERVAL))
+                .replace("__TRANSITION_DURATION__", transition_duration)
                 .replace("__GALLERY__", gallery_html))
         return html
 
@@ -186,6 +245,27 @@ def create_app(image_folder):
 
         if request.headers.get("Accept") == "application/json":
             return {"filename": filename, "hidden": is_hidden}, 200
+
+        return redirect("/")
+
+    @app.route("/settings", methods=["POST"])
+    def update_settings():
+        try:
+            duration = float(request.form.get("transition_duration"))
+        except (TypeError, ValueError):
+            return {"error": "invalid transition_duration"}, 400
+
+        # 想定外の値が来ても安全なようにクランプしておく
+        duration = round(max(0.1, min(duration, 5.0)), 1)
+
+        signage_state.save_settings(
+            image_folder,
+            {"transition_duration": duration},
+            defaults={"transition_duration": DEFAULT_TRANSITION_DURATION},
+        )
+
+        if request.headers.get("Accept") == "application/json":
+            return {"transition_duration": duration}, 200
 
         return redirect("/")
 

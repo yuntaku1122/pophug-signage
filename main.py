@@ -15,7 +15,7 @@ import io
 import threading
 from datetime import datetime
 from config import *
-from signage_state import load_hidden, hidden_mtime
+from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime
 
 try:
     import qrcode
@@ -96,6 +96,10 @@ class PopSignage:
         self.last_hidden_check_time = 0
         self.last_hidden_mtime = hidden_mtime(IMAGE_FOLDER)
 
+        # Web側で変更されたトランジション時間などの設定を読み込んで反映
+        self.last_settings_mtime = settings_mtime(IMAGE_FOLDER)
+        self._apply_settings()
+
         self.qr_active = False        # QRコードオーバーレイの表示中フラグ
         self.qr_hide_time = 0
         self.qr_surface = None
@@ -113,6 +117,15 @@ class PopSignage:
             self.setup_qr_button()
 
     # ---------------- 画像読み込み ----------------
+
+    def _apply_settings(self):
+        """images/.settings.json の内容を読み込み、実行中の設定（TRANSITION_DURATIONなど）に反映する。
+        Web側のスライダーで変更された値をここで取り込む。"""
+        settings = load_settings(IMAGE_FOLDER, {"transition_duration": TRANSITION_DURATION})
+        new_duration = settings.get("transition_duration", TRANSITION_DURATION)
+        if new_duration != globals().get("TRANSITION_DURATION"):
+            globals()["TRANSITION_DURATION"] = new_duration
+            log(f"トランジション時間を更新: {new_duration}秒")
 
     def load_pop_images(self, initial=False):
         """images/ フォルダを読み込み、新しい画像があれば反映する。
@@ -390,15 +403,21 @@ class PopSignage:
 
                 now = time.time()
 
-                # 表示/非表示の切替は、状態ファイルの更新時刻だけを軽くチェックして
-                # 即座に反映する（フォルダ全体の再スキャンより高頻度・低負荷）
+                # 表示/非表示の切替と、Web側で変更された表示設定は、状態ファイルの
+                # 更新時刻だけを軽くチェックして即座に反映する
                 if now - self.last_hidden_check_time >= HIDDEN_CHECK_INTERVAL:
                     self.last_hidden_check_time = now
+
                     current_mtime = hidden_mtime(IMAGE_FOLDER)
                     if current_mtime != self.last_hidden_mtime:
                         self.last_hidden_mtime = current_mtime
                         self.load_pop_images()
                         self.last_scan_time = now
+
+                    current_settings_mtime = settings_mtime(IMAGE_FOLDER)
+                    if current_settings_mtime != self.last_settings_mtime:
+                        self.last_settings_mtime = current_settings_mtime
+                        self._apply_settings()
 
                 if now - self.last_scan_time >= RESCAN_INTERVAL:
                     self.last_scan_time = now
