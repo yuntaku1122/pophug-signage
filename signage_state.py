@@ -8,9 +8,28 @@
 
 import json
 import os
+import tempfile
 import threading
 
 _lock = threading.Lock()
+
+
+def _atomic_write_json(path, data):
+    """一時ファイルに書き込んでからos.replace()で置き換える。
+    書き込み中に電源が落ちても、元のファイルか新しいファイルかのどちらかが
+    必ず残る（中途半端に壊れた状態にはならない）。"""
+    folder = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())  # OSのバッファに留まらず実際にディスクへ書き切らせる
+        os.replace(tmp_path, path)  # 同一ファイルシステム内でのrenameはPOSIX上atomic
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
 
 def _state_path(image_folder):
@@ -32,8 +51,7 @@ def load_hidden(image_folder):
 def save_hidden(image_folder, hidden_set):
     path = _state_path(image_folder)
     with _lock:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(sorted(hidden_set), f, ensure_ascii=False)
+        _atomic_write_json(path, sorted(hidden_set))
 
 
 def toggle_hidden(image_folder, filename):
@@ -84,8 +102,7 @@ def save_settings(image_folder, updates, defaults=None):
     settings.update(updates)
     path = _settings_path(image_folder)
     with _lock:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False)
+        _atomic_write_json(path, settings)
     return settings
 
 
