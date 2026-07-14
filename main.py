@@ -106,6 +106,7 @@ class PopSignage:
         self.qr_label_surface = None
         self.qr_url_surface = None
         self.qr_url = ""
+        self._qr_pause_start = None   # QR表示開始時刻（スライドショー一時停止分の巻き戻しに使う）
 
         self.load_pop_images(initial=True)
 
@@ -285,10 +286,23 @@ class PopSignage:
     def toggle_qr_code(self):
         """QR表示中にもう一度押されたら即座に消す。非表示中なら新たに表示する。"""
         if self.qr_active:
-            self.qr_active = False
+            self._hide_qr()
             log("QRコード非表示（ボタン再押下）")
         else:
             self.show_qr_code()
+
+    def _hide_qr(self):
+        """QRコードを非表示にする。QR表示中に一時停止していたスライドショーの
+        タイマーを、停止していた時間分だけ巻き戻して違和感なく再開させる。"""
+        if not self.qr_active:
+            return
+        if self._qr_pause_start is not None:
+            paused = time.time() - self._qr_pause_start
+            self.pop_start_time += paused
+            if self.in_transition:
+                self.transition_start_time += paused
+            self._qr_pause_start = None
+        self.qr_active = False
 
     def show_qr_code(self):
         """アップロードページのURLをQRコードとして生成し、画面に一定時間オーバーレイ表示する"""
@@ -321,7 +335,8 @@ class PopSignage:
                 url, max_text_width, start_size=22, min_size=12, color=(210, 210, 210))
             self.qr_active = True
             self.qr_hide_time = time.time() + QR_DISPLAY_SECONDS
-            log(f"QRコード表示: {url}")
+            self._qr_pause_start = time.time()  # スライドショー一時停止の起点を記録
+            log(f"QRコード表示: {url}（スライドショーを一時停止）")
         except Exception as e:
             log(f"QRコード生成エラー: {e}")
 
@@ -340,7 +355,7 @@ class PopSignage:
 
     def draw_qr_overlay(self):
         if time.time() >= self.qr_hide_time:
-            self.qr_active = False
+            self._hide_qr()
             return
 
         w = self.canvas.get_width()
@@ -388,6 +403,13 @@ class PopSignage:
                 self.canvas.get_width() // 2 - text.get_width() // 2,
                 self.canvas.get_height() // 2
             ))
+            return
+
+        if self.qr_active:
+            # QR表示中はスライドショーを一時停止する。時間の巻き戻しは
+            # show_qr_code/_hide_qr側で行うので、ここでは現在の画像を
+            # そのまま静止表示するだけでよい（切り替え判定は一切行わない）。
+            self.canvas.blit(images[cur_idx % len(images)], (0, 0))
             return
 
         now = time.time()
@@ -480,11 +502,16 @@ class PopSignage:
                         self.last_hidden_mtime = current_mtime
                         self.load_pop_images()
                         self.last_scan_time = now
+                        # スマホ側で表示/非表示の操作が行われた=もう見ているはずなので、
+                        # QRコードは役目を終えたとみなして消す
+                        self._hide_qr()
 
                     current_settings_mtime = settings_mtime(IMAGE_FOLDER)
                     if current_settings_mtime != self.last_settings_mtime:
                         self.last_settings_mtime = current_settings_mtime
                         self._apply_settings()
+                        # 同様に、設定変更が行われた=スマホ操作が始まっている合図としてQRを消す
+                        self._hide_qr()
 
                 if now - self.last_scan_time >= RESCAN_INTERVAL:
                     self.last_scan_time = now
