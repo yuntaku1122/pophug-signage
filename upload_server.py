@@ -530,12 +530,27 @@ def create_app(image_folder):
         if request.form.get("confirm") != "yes":
             return {"error": "confirmation required"}, 400
 
+        print(f"[shutdown] 要求を受け付けました。実行コマンド: {' '.join(SHUTDOWN_COMMAND)}")
+
         def do_shutdown():
             time.sleep(1)  # レスポンスをブラウザに返してから実行する
             try:
-                subprocess.run(SHUTDOWN_COMMAND, check=True)
+                result = subprocess.run(
+                    SHUTDOWN_COMMAND, check=True, capture_output=True, text=True, timeout=15
+                )
+                print(f"[shutdown] コマンド実行成功 (returncode={result.returncode})")
+                if result.stdout:
+                    print(f"[shutdown] stdout: {result.stdout.strip()}")
+                if result.stderr:
+                    print(f"[shutdown] stderr: {result.stderr.strip()}")
+            except subprocess.CalledProcessError as e:
+                print(f"[shutdown] コマンドが失敗しました (returncode={e.returncode})")
+                print(f"[shutdown] stdout: {e.stdout}")
+                print(f"[shutdown] stderr: {e.stderr}")
+            except subprocess.TimeoutExpired:
+                print("[shutdown] コマンドがタイムアウトしました（sudoがパスワード入力待ちで固まっている可能性があります）")
             except Exception as e:
-                print(f"シャットダウンコマンドの実行に失敗しました: {e}")
+                print(f"[shutdown] 予期しないエラー: {e}")
 
         threading.Thread(target=do_shutdown, daemon=True).start()
 
