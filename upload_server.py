@@ -20,6 +20,9 @@
 # ============================================
 
 import os
+import subprocess
+import threading
+import time
 from datetime import datetime
 
 import signage_state
@@ -51,6 +54,10 @@ TRANSITION_TYPE_LABELS = {
     "slide_up": "上にスワイプ（下→上）",
     "slide_down": "下にスワイプ（上→下）",
 }
+
+# シャットダウン実行コマンド。pophugユーザーがパスワード無しで実行できるよう
+# /etc/sudoers.d/pophug-shutdown で個別に許可しておく必要がある（README参照）。
+SHUTDOWN_COMMAND = ["sudo", "/sbin/shutdown", "-h", "now"]
 
 try:
     from config import ROTATE_SCREEN as DEFAULT_ROTATION
@@ -116,6 +123,10 @@ UPLOAD_PAGE = """
   .rotate-row button:active { background:#333; }
   .rotation-current { text-align:center; font-size:14px; color:#333; margin-bottom:4px; }
   .version-footer { text-align:center; font-size:11px; color:#bbb; margin:28px 0 8px; }
+  .danger-box { border:1px solid #f3c2c2; }
+  .danger-box h1 { color:#c0392b; }
+  .danger-box button { background:#c0392b; }
+  .danger-box button:disabled { background:#e0a5a5; }
 </style>
 </head>
 <body>
@@ -311,6 +322,49 @@ UPLOAD_PAGE = """
   })();
   </script>
 
+  <script>
+  (function () {
+    var btn = document.getElementById('shutdown-btn');
+    var status = document.getElementById('shutdown-status');
+
+    btn.addEventListener('click', function () {
+      var confirmed = window.confirm(
+        '本当にラズパイをシャットダウンしますか？\n' +
+        '電源を入れ直すまで、サイネージもこのアップロードページも使えなくなります。'
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      btn.disabled = true;
+      status.textContent = 'シャットダウンしています…';
+
+      fetch('/shutdown', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'confirm=yes'
+      })
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          status.textContent = '数十秒後に電源が切れます。再起動するには電源を入れ直してください。';
+        })
+        .catch(function () {
+          status.textContent = 'シャットダウンの開始に失敗しました。';
+          btn.disabled = false;
+        });
+    });
+  })();
+  </script>
+
+  <div class="box danger-box" style="margin-top:16px;">
+    <h1>システム</h1>
+    <button type="button" id="shutdown-btn">ラズパイをシャットダウン</button>
+    <p class="setting-status" id="shutdown-status"></p>
+  </div>
+
   <p class="version-footer">KitchenCar POP Signage v__VERSION__</p>
 </body>
 </html>
@@ -466,6 +520,27 @@ def create_app(image_folder):
 
         if request.headers.get("Accept") == "application/json":
             return {"rotation": new_rotation}, 200
+
+        return redirect("/")
+
+    @app.route("/shutdown", methods=["POST"])
+    def shutdown():
+        # クライアント側のconfirm()ダイアログに加え、サーバー側でも
+        # confirm=yesが明示的に送られてきた場合のみ実行する二重の安全策
+        if request.form.get("confirm") != "yes":
+            return {"error": "confirmation required"}, 400
+
+        def do_shutdown():
+            time.sleep(1)  # レスポンスをブラウザに返してから実行する
+            try:
+                subprocess.run(SHUTDOWN_COMMAND, check=True)
+            except Exception as e:
+                print(f"シャットダウンコマンドの実行に失敗しました: {e}")
+
+        threading.Thread(target=do_shutdown, daemon=True).start()
+
+        if request.headers.get("Accept") == "application/json":
+            return {"status": "shutting_down"}, 200
 
         return redirect("/")
 
