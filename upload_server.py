@@ -322,6 +322,12 @@ UPLOAD_PAGE = """
   })();
   </script>
 
+  <div class="box danger-box" style="margin-top:16px;">
+    <h1>システム</h1>
+    <button type="button" id="shutdown-btn">ラズパイをシャットダウン</button>
+    <p class="setting-status" id="shutdown-status"></p>
+  </div>
+
   <script>
   (function () {
     var btn = document.getElementById('shutdown-btn');
@@ -358,12 +364,6 @@ UPLOAD_PAGE = """
     });
   })();
   </script>
-
-  <div class="box danger-box" style="margin-top:16px;">
-    <h1>システム</h1>
-    <button type="button" id="shutdown-btn">ラズパイをシャットダウン</button>
-    <p class="setting-status" id="shutdown-status"></p>
-  </div>
 
   <p class="version-footer">KitchenCar POP Signage v__VERSION__</p>
 </body>
