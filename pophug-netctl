@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+# ============================================
+# pophug-netctl
+#
+# KitchenCar POP Signageの「Wi-Fiセットアップモード」用の、
+# root権限が必要なネットワーク操作だけを行う限定ヘルパースクリプト。
+#
+# アプリ本体(pophugユーザー)はこのスクリプトだけをsudo経由で呼び出す。
+# nmcliを直接野放しにするのではなく、ここで扱えるコマンドと
+# 引数の形式を厳しく制限することで、必要最小限の権限だけを与える。
+#
+# 使い方:
+#   pophug-netctl hotspot-start <ssid> <password>
+#   pophug-netctl hotspot-stop
+#   pophug-netctl scan
+#   pophug-netctl connect <ssid> <password>
+#
+# インストール:
+#   sudo cp scripts/pophug-netctl /usr/local/bin/
+#   sudo chmod 755 /usr/local/bin/pophug-netctl
+#   sudo chown root:root /usr/local/bin/pophug-netctl
+# ============================================
+
+import re
+import subprocess
+import sys
+
+HOTSPOT_CON_NAME = "pophug-setup-ap"
+
+SSID_RE = re.compile(r"^[\w\-\. ]{1,32}$")
+
+
+def run(cmd, timeout=30):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        class _R:
+            returncode = 1
+            stdout = ""
+            stderr = "timeout"
+        return _R()
+
+
+def valid_ssid(ssid):
+    return bool(SSID_RE.match(ssid))
+
+
+def valid_password(password):
+    # 空文字(オープンネットワーク)か、WPA2の規格上の範囲(8〜63文字)
+    return password == "" or 8 <= len(password) <= 63
+
+
+def cmd_hotspot_start(args):
+    if len(args) != 2:
+        sys.exit("usage: hotspot-start <ssid> <password>")
+    ssid, password = args
+    if not valid_ssid(ssid):
+        sys.exit("invalid ssid")
+    if not valid_password(password):
+        sys.exit("invalid password")
+
+    # 既存の同名プロファイルが残っていれば作り直す
+    run(["nmcli", "connection", "delete", HOTSPOT_CON_NAME])
+
+    add_cmd = [
+        "nmcli", "connection", "add", "type", "wifi", "ifname", "wlan0",
+        "con-name", HOTSPOT_CON_NAME, "autoconnect", "no", "ssid", ssid,
+        "802-11-wireless.mode", "ap", "802-11-wireless.band", "bg",
+        "ipv4.method", "shared",
+    ]
+    if password:
+        add_cmd += ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", password]
+
+    r = run(add_cmd)
+    if r.returncode != 0:
+        sys.exit(f"failed to create hotspot profile: {r.stderr}")
+
+    r = run(["nmcli", "connection", "up", HOTSPOT_CON_NAME])
+    if r.returncode != 0:
+        sys.exit(f"failed to activate hotspot: {r.stderr}")
+
+    print("hotspot started")
+
+
+def cmd_hotspot_stop(args):
+    run(["nmcli", "connection", "down", HOTSPOT_CON_NAME])
+    run(["nmcli", "connection", "delete", HOTSPOT_CON_NAME])
+    print("hotspot stopped")
+
+
+def cmd_scan(args):
+    run(["nmcli", "device", "wifi", "rescan"])
+    r = run(["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"], timeout=20)
+    print(r.stdout)
+
+
+def cmd_connect(args):
+    if len(args) != 2:
+        sys.exit("usage: connect <ssid> <password>")
+    ssid, password = args
+    if not valid_ssid(ssid):
+        sys.exit("invalid ssid")
+    if not valid_password(password):
+        sys.exit("invalid password")
+
+    # Pi Zero 2Wは無線が1系統しか無いため、セットアップ用アクセスポイントと
+    # 通常の子機接続を同時には維持できない。接続を試す前に一旦落とす。
+    run(["nmcli", "connection", "down", HOTSPOT_CON_NAME])
+
+    connect_cmd = ["nmcli", "device", "wifi", "connect", ssid]
+    if password:
+        connect_cmd += ["password", password]
+    r = run(connect_cmd, timeout=45)
+
+    if r.returncode != 0:
+        # 失敗したらセットアップ用アクセスポイントに戻し、再試行できるようにする
+        run(["nmcli", "connection", "up", HOTSPOT_CON_NAME])
+        sys.exit(f"connect failed: {r.stderr or r.stdout}")
+
+    run(["nmcli", "connection", "delete", HOTSPOT_CON_NAME])
+    print("connected")
+
+
+COMMANDS = {
+    "hotspot-start": cmd_hotspot_start,
+    "hotspot-stop": cmd_hotspot_stop,
+    "scan": cmd_scan,
+    "connect": cmd_connect,
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        sys.exit(f"usage: pophug-netctl <{'|'.join(COMMANDS)}> [args...]")
+    COMMANDS[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

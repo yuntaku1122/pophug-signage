@@ -14,8 +14,6 @@
 | `config.py` | 画面サイズ、間隔、GPIOピン番号などの設定 |
 | `upload_server.py` | iPhoneからの画像アップロード用Webサーバー（Flask） |
 | `signage_state.py` | 表示/非表示・トランジション速度などの状態（`images/.hidden.json`, `images/.settings.json`）の読み書き |
-| `wifi_setup.py` | Wi-Fiセットアップモード関連（SSID自動生成、QRペイロード生成、netctl呼び出し） |
-| `scripts/pophug-netctl` | root権限が必要なネットワーク操作だけを行う限定ヘルパー（要インストール、後述） |
 | `version.py` | バージョン情報・変更履歴 |
 
 ## セットアップ
@@ -33,12 +31,10 @@ python3 main.py
 ## QRコードボタン
 
 ラズパイ単体運用時、IPアドレスが分からずアップロードページにアクセスできない問題への対策。
-`config.py`の`QR_BUTTON_GPIO_PIN`（デフォルトGPIO17、内部プルアップ・GND間にボタン接続）を**短く押す**と、
-アップロードページのURLをQRコードで一時的に画面表示する。**3秒以上長押し**すると、後述の
-「Wi-Fiセットアップモード」に入る。
+`config.py`の`QR_BUTTON_GPIO_PIN`（デフォルトGPIO17、内部プルアップ・GND間にボタン接続）を押すと、
+アップロードページのURLをQRコードで一時的に画面表示する。
 
-GPIOが無い環境（Mac等）では、ウィンドウ選択中に**Qキー**でQR表示、**Wキー**でWi-Fiセットアップモードを
-それぞれ確認できる（実機と違い、長押し判定は無く即座にモードに入る）。
+GPIOが無い環境（Mac等）では、ウィンドウ選択中に**Qキー**を押すことで同じ動作を確認できる。
 
 ## シャットダウンボタン
 
@@ -54,41 +50,6 @@ sudo visudo -c    # "parsed OK" と出れば設定完了
 ```
 
 `upload_server.py`の`SHUTDOWN_COMMAND`と、上記sudoersのパスは必ず一致させること。
-
-## Wi-Fiセットアップモード（モニター/キーボード不要でのWi-Fi設定）
-
-「無垢な状態」のPiでも、スマホだけで新しい出店先のWi-Fiを設定できる機能。QRボタンを
-**3秒以上長押し**すると、Piが一時的に自分専用のアクセスポイントを立てる。
-
-1. 画面にQRコード（読み取ると直接そのWi-Fiに繋がる）とSSID/パスワードが表示される
-2. スマホをそのWi-Fiに繋ぎ、画面のURL（`http://10.42.0.1:8080/wifi`）を開く
-3. 周辺のWi-Fi一覧から選ぶ（または手動入力）→パスワード入力→接続
-4. 接続に成功すると、Piは自動的にアクセスポイントを終了して通常運用に戻る
-5. 途中でやめたい時はボタンを押すとキャンセルできる（10分操作が無くても自動キャンセル）
-
-セットアップ用アクセスポイントのSSIDは、**機体のMACアドレス下4桁**を使って自動的に一意になる
-（例: `pophug-setup-3F2A`）。同じ製品を複数台並べても電波が衝突しない。パスワードは
-`config.py`の`WIFI_SETUP_DEFAULT_PASSWORD`が初期値（アップロードページの「ネットワーク」から
-後で変更可能）。
-
-### インストール（Pi側で1回だけ必要）
-
-ネットワーク設定の変更にはroot権限が必要なため、限定的な操作だけを行うヘルパースクリプトを
-配置し、それだけをsudoで許可する。
-
-```bash
-sudo cp scripts/pophug-netctl /usr/local/bin/
-sudo chmod 755 /usr/local/bin/pophug-netctl
-sudo chown root:root /usr/local/bin/pophug-netctl
-
-echo "pophug ALL=(ALL) NOPASSWD: /usr/local/bin/pophug-netctl *" | sudo tee /etc/sudoers.d/pophug-netctl
-sudo chmod 440 /etc/sudoers.d/pophug-netctl
-sudo visudo -c    # "parsed OK" と出れば設定完了
-```
-
-`pophug-netctl`自体が、実行できるコマンド（アクセスポイントの起動/停止、Wi-Fiスキャン、
-接続）とその引数の形式を厳しく制限しているため、`*`で任意引数を許可していても、
-それ以上の任意コマンド実行はできない設計になっている。
 
 ## 動作環境
 
@@ -109,7 +70,6 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
-| 4.0.0 | ボタン長押しで入る「Wi-Fiセットアップモード」を追加。モニター/キーボード無しでもスマホだけで無垢な状態のPiに新しいWi-Fiを設定できるように |
 | 3.9.0 | QRコード表示中はスライドショーを一時停止するように変更。Web側での表示切替・設定変更を検知したらQRを自動的に閉じてスライドショーを再開 |
 | 3.8.0 | Webページに確認ダイアログ付きのシャットダウンボタンを追加 |
 | 3.7.0 | 画面切り替え効果にスライド（上下左右にスワイプ風）を追加し、Webのプルダウンでフェード/スライドを選択できるように |

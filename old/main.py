@@ -15,7 +15,6 @@ from datetime import datetime
 from config import *
 from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime
 from version import __version__
-import wifi_setup
 
 try:
     import qrcode
@@ -108,14 +107,6 @@ class PopSignage:
         self.qr_url_surface = None
         self.qr_url = ""
         self._qr_pause_start = None   # QR表示開始時刻（スライドショー一時停止分の巻き戻しに使う）
-
-        self.wifi_setup_active = False
-        self.wifi_setup_start_time = 0
-        self.wifi_setup_ssid = ""
-        self.wifi_setup_password = ""
-        self.wifi_setup_qr_surface = None
-        self.wifi_setup_text_surfaces = []
-        self.last_wifi_setup_check_time = 0
 
         self.load_pop_images(initial=True)
 
@@ -281,41 +272,19 @@ class PopSignage:
     # ---------------- QRコード表示ボタン ----------------
 
     def setup_qr_button(self):
-        """ボタンの短押しでQRコード表示/非表示をトグル、長押しでWi-Fiセットアップモードに入る。
-        ラズパイ実機ではGPIOボタン、Mac等GPIOが無い環境では
-        Qキー(QR表示)・Wキー(Wi-Fiセットアップモード)で代用する。"""
-        self._button_long_pressed = False
+        """外付けボタンを押すとアップロードページのQRコードを表示/非表示をトグルする。
+        ラズパイ実機ではGPIOボタン、Mac等GPIOが無い環境ではQキーで代用する。"""
         try:
             from gpiozero import Button
-            button = Button(QR_BUTTON_GPIO_PIN, pull_up=True, bounce_time=0.2,
-                             hold_time=WIFI_SETUP_HOLD_SECONDS)
-            button.when_held = self._on_button_held
-            button.when_released = self._on_button_released
+            button = Button(QR_BUTTON_GPIO_PIN, pull_up=True, bounce_time=0.2)
+            button.when_pressed = self.toggle_qr_code
             self._qr_button = button  # ガベージコレクトされないよう保持
-            log(f"QRボタン待受け開始（GPIO{QR_BUTTON_GPIO_PIN}、"
-                f"長押し{WIFI_SETUP_HOLD_SECONDS}秒でWi-Fiセットアップモード）")
+            log(f"QRボタン待受け開始（GPIO{QR_BUTTON_GPIO_PIN}）")
         except Exception as e:
-            log(f"GPIOボタンが利用できません（{e}）。"
-                f"代わりにキーボードの[Q]キーでQR表示、[W]キーでWi-Fiセットアップモードを確認できます")
-
-    def _on_button_held(self):
-        """長押し閾値に達した時に呼ばれる（gpiozeroが押されている間に自動判定）"""
-        self._button_long_pressed = True
-        self.enter_wifi_setup_mode()
-
-    def _on_button_released(self):
-        """ボタンが離された時に呼ばれる。長押し判定済みなら短押し動作(QRトグル)は行わない。"""
-        if self._button_long_pressed:
-            self._button_long_pressed = False
-            return
-        self.toggle_qr_code()
+            log(f"GPIOボタンが利用できません（{e}）。代わりにキーボードの[Q]キーでQR表示できます")
 
     def toggle_qr_code(self):
         """QR表示中にもう一度押されたら即座に消す。非表示中なら新たに表示する。"""
-        if self.wifi_setup_active:
-            # セットアップモード中はボタンをキャンセル操作として扱う
-            self.exit_wifi_setup_mode()
-            return
         if self.qr_active:
             self._hide_qr()
             log("QRコード非表示（ボタン再押下）")
@@ -419,104 +388,6 @@ class PopSignage:
         url_y = label_y + label.get_height() + 10
         self.canvas.blit(url_s, (w // 2 - url_s.get_width() // 2, url_y))
 
-    # ---------------- Wi-Fiセットアップモード ----------------
-
-    def enter_wifi_setup_mode(self):
-        """ボタン長押しで呼ばれる。Piが一時的な専用アクセスポイントを立て、
-        モニター/キーボード無しでもスマホだけでWi-Fi設定ができるようにする。"""
-        if self.wifi_setup_active:
-            return
-
-        settings = load_settings(IMAGE_FOLDER, {
-            "setup_ap_ssid": wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX),
-            "setup_ap_password": WIFI_SETUP_DEFAULT_PASSWORD,
-        })
-        ssid = settings.get("setup_ap_ssid") or wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX)
-        password = settings.get("setup_ap_password", WIFI_SETUP_DEFAULT_PASSWORD)
-
-        log(f"Wi-Fiセットアップモードへ切り替え中... SSID={ssid}")
-        self._hide_qr()
-
-        ok, out, err = wifi_setup.start_hotspot(ssid, password)
-        if not ok:
-            log(f"アクセスポイントの起動に失敗しました: {err or out}")
-            return
-
-        self.wifi_setup_active = True
-        self.wifi_setup_start_time = time.time()
-        self.wifi_setup_ssid = ssid
-        self.wifi_setup_password = password
-        self._build_wifi_setup_surfaces()
-        log("Wi-Fiセットアップモードに入りました（ボタンを押すとキャンセルできます）")
-
-    def exit_wifi_setup_mode(self):
-        """セットアップモードを明示的に終了し、アクセスポイントを閉じて通常運用に戻る"""
-        if not self.wifi_setup_active:
-            return
-        log("Wi-Fiセットアップモードを終了しています...")
-        wifi_setup.stop_hotspot()
-        self.wifi_setup_active = False
-        log("通常モードに戻りました")
-
-    def _build_wifi_setup_surfaces(self):
-        """セットアップ画面に表示するQRコードと案内テキストを生成する"""
-        w = self.canvas.get_width()
-        h = self.canvas.get_height()
-
-        payload = wifi_setup.wifi_qr_payload(self.wifi_setup_ssid, self.wifi_setup_password)
-        qr_img = qrcode.QRCode(box_size=8, border=2)
-        qr_img.add_data(payload)
-        qr_img.make(fit=True)
-        pil_img = qr_img.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO()
-        pil_img.save(buf, format="PNG")
-        buf.seek(0)
-        surface = pygame.image.load(buf)
-        size = int(min(w, h) * 0.4)
-        self.wifi_setup_qr_surface = pygame.transform.scale(surface, (size, size))
-
-        max_text_width = w - 48
-        setup_url = f"http://{wifi_setup.get_hotspot_ip()}:{UPLOAD_PORT}/wifi"
-        lines = [
-            ("Wi-Fiセットアップモード", 30, (255, 255, 255)),
-            (f"SSID: {self.wifi_setup_ssid}", 24, (230, 230, 230)),
-            (f"パスワード: {self.wifi_setup_password}", 24, (230, 230, 230)),
-            ("↑QRコードを読み取るか、上記に手動接続後", 20, (200, 200, 200)),
-            (setup_url, 22, (150, 220, 150)),
-            ("を開いてください（ボタンでキャンセル）", 20, (200, 200, 200)),
-        ]
-        self.wifi_setup_text_surfaces = [
-            self._render_fit_text(text, max_text_width, start_size=size, min_size=12, color=color)
-            for text, size, color in lines
-        ]
-
-    def draw_wifi_setup_screen(self):
-        """Wi-Fiセットアップモード中の画面を描画する"""
-        w = self.canvas.get_width()
-        h = self.canvas.get_height()
-        self.canvas.fill((20, 20, 25))
-
-        qr = self.wifi_setup_qr_surface
-        if qr is None:
-            return
-
-        white_bg = pygame.Surface((qr.get_width() + 24, qr.get_height() + 24))
-        white_bg.fill((255, 255, 255))
-
-        total_text_h = sum(s.get_height() + 8 for s in self.wifi_setup_text_surfaces)
-        total_h = qr.get_height() + 24 + total_text_h
-        top = max(10, h // 2 - total_h // 2)
-
-        qr_x = w // 2 - qr.get_width() // 2
-        qr_y = top
-        self.canvas.blit(white_bg, (qr_x - 12, qr_y - 12))
-        self.canvas.blit(qr, (qr_x, qr_y))
-
-        y = qr_y + qr.get_height() + 24
-        for surf in self.wifi_setup_text_surfaces:
-            self.canvas.blit(surf, (w // 2 - surf.get_width() // 2, y))
-            y += surf.get_height() + 8
-
     # ---------------- 描画 ----------------
 
     def draw_pop_mode(self):
@@ -618,12 +489,6 @@ class PopSignage:
                         if event.key == pygame.K_q:
                             # Mac等、GPIOボタンが無い環境での動作確認用
                             self.toggle_qr_code()
-                        if event.key == pygame.K_w:
-                            # Mac等、GPIOボタンが無い環境でのWi-Fiセットアップモード確認用
-                            if self.wifi_setup_active:
-                                self.exit_wifi_setup_mode()
-                            else:
-                                self.enter_wifi_setup_mode()
 
                 now = time.time()
 
@@ -652,24 +517,9 @@ class PopSignage:
                     self.last_scan_time = now
                     self.load_pop_images()
 
-                if self.wifi_setup_active:
-                    # 2秒おきに、外部(Web側の接続操作)によってアクセスポイントが
-                    # 既に落とされていないか・タイムアウトしていないかを確認する
-                    if now - self.last_wifi_setup_check_time >= 2:
-                        self.last_wifi_setup_check_time = now
-                        if not wifi_setup.is_hotspot_active():
-                            log("Wi-Fi接続が完了したようです。通常モードに戻ります")
-                            self.wifi_setup_active = False
-                        elif now - self.wifi_setup_start_time >= WIFI_SETUP_TIMEOUT_SECONDS:
-                            log("Wi-Fiセットアップモードがタイムアウトしました。通常モードに戻ります")
-                            self.exit_wifi_setup_mode()
-
-                if self.wifi_setup_active:
-                    self.draw_wifi_setup_screen()
-                else:
-                    self.draw_pop_mode()
-                    if self.qr_active:
-                        self.draw_qr_overlay()
+                self.draw_pop_mode()
+                if self.qr_active:
+                    self.draw_qr_overlay()
 
                 if ROTATE_SCREEN:
                     # pygame.transform.rotateは反時計回りが正の角度なので、

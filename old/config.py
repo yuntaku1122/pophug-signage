@@ -44,11 +44,3 @@ QR_BUTTON_ENABLED = True
 QR_BUTTON_GPIO_PIN = 17       # BCM番号。配線に合わせて変更（ボタンはこのピンとGNDの間に接続、内部プルアップ使用）
 QR_DISPLAY_SECONDS = 30       # QRコードを表示し続ける時間（秒）
 UPLOAD_URL_OVERRIDE = None    # 固定IPで運用する場合など、URLを手動指定したい時は文字列で指定 (例: "http://192.168.4.1:8080")
-
-# Wi-Fiセットアップモード設定
-# QRボタンを長押しすると、Piが一時的な無垢な状態からでもスマホだけで
-# Wi-Fi設定ができるよう、自分専用のアクセスポイントを一時的に立てる。
-WIFI_SETUP_HOLD_SECONDS = 3          # ボタン長押しでセットアップモードに入るまでの秒数
-WIFI_SETUP_SSID_PREFIX = "pophug-setup"     # 実際のSSIDは末尾にMACアドレス由来の4桁が付く（機体ごとに一意）
-WIFI_SETUP_DEFAULT_PASSWORD = "pophugsetup1234"  # 出荷時デフォルト。取扱説明書に記載する想定
-WIFI_SETUP_TIMEOUT_SECONDS = 600     # セットアップモードのまま操作が無かった場合に自動キャンセルするまでの秒数

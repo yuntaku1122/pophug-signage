@@ -24,10 +24,8 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from html import escape as _h
 
 import signage_state
-import wifi_setup
 
 try:
     from config import RESCAN_INTERVAL
@@ -48,12 +46,6 @@ try:
     from config import TRANSITION_TYPE as DEFAULT_TRANSITION_TYPE
 except ImportError:
     DEFAULT_TRANSITION_TYPE = "fade"
-
-try:
-    from config import WIFI_SETUP_SSID_PREFIX, WIFI_SETUP_DEFAULT_PASSWORD
-except ImportError:
-    WIFI_SETUP_SSID_PREFIX = "pophug-setup"
-    WIFI_SETUP_DEFAULT_PASSWORD = "pophugsetup1234"
 
 TRANSITION_TYPE_LABELS = {
     "fade": "フェード（じわっと重なる）",
@@ -330,13 +322,6 @@ UPLOAD_PAGE = """
   })();
   </script>
 
-  <div class="box" style="margin-top:16px;">
-    <h1>ネットワーク</h1>
-    <p class="hint" style="margin:0 0 12px;">出店先のWi-Fiを切り替えたい時はこちら</p>
-    <a href="/wifi" style="display:block; text-align:center; padding:14px; background:#555;
-       color:#fff; border-radius:8px; text-decoration:none; font-size:15px;">Wi-Fi設定を開く</a>
-  </div>
-
   <div class="box danger-box" style="margin-top:16px;">
     <h1>システム</h1>
     <button type="button" id="shutdown-btn">ラズパイをシャットダウン</button>
@@ -410,139 +395,6 @@ def render_transition_type_options(current):
         selected = " selected" if value == current else ""
         opts.append(f'<option value="{value}"{selected}>{label}</option>')
     return "".join(opts)
-
-
-WIFI_SETUP_PAGE = """
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wi-Fi設定</title>
-<style>
-  body { font-family: -apple-system, sans-serif; background:#f5f5f0; margin:0; padding:24px; }
-  h1 { font-size:20px; color:#228b22; }
-  h2 { font-size:15px; color:#333; margin:24px 0 8px; }
-  .box { background:#fff; border-radius:12px; padding:20px; box-shadow:0 2px 8px rgba(0,0,0,0.08); }
-  .net-list { list-style:none; padding:0; margin:0 0 16px; }
-  .net-item { padding:12px; border:1px solid #ddd; border-radius:8px; margin-bottom:8px;
-              display:flex; justify-content:space-between; align-items:center; cursor:pointer; }
-  .net-item.selected { border-color:#228b22; background:#f0f7f0; }
-  .net-signal { font-size:12px; color:#999; }
-  input[type=text], input[type=password] {
-    width:100%; box-sizing:border-box; padding:12px; margin:8px 0; border:1px solid #ccc;
-    border-radius:8px; font-size:15px;
-  }
-  button { width:100%; padding:14px; background:#228b22; color:#fff; border:none;
-           border-radius:8px; font-size:16px; margin-top:8px; }
-  .status { font-size:13px; color:#666; min-height:18px; margin-top:10px; }
-  .hint { font-size:12px; color:#888; }
-</style>
-</head>
-<body>
-  <div class="box">
-    <h1>Wi-Fi設定</h1>
-    <p class="hint">接続したいWi-Fiを選ぶか、下に直接入力してください。</p>
-    <ul class="net-list" id="net-list">
-      __NETWORK_ITEMS__
-    </ul>
-    <form id="wifi-form">
-      <input type="text" id="ssid" name="ssid" placeholder="SSID（ネットワーク名）" autocapitalize="none" autocorrect="off">
-      <input type="password" id="password" name="password" placeholder="パスワード（オープンな場合は空欄）">
-      <button type="submit">このWi-Fiに接続する</button>
-    </form>
-    <p class="status" id="wifi-status"></p>
-    <p class="hint">送信すると、このスマホは一時的にWi-Fiから切断されます。サイネージの画面がスライドショーに戻れば設定完了です。</p>
-  </div>
-
-  <div class="box" style="margin-top:16px;">
-    <h2>次回セットアップ時のアクセスポイント名</h2>
-    <p class="hint">ボタン長押しで出てくる、この一時Wi-Fi自体の名前とパスワードを変更できます。</p>
-    <form id="ap-form">
-      <input type="text" id="ap-ssid" name="setup_ap_ssid" value="__AP_SSID__" maxlength="32">
-      <input type="text" id="ap-password" name="setup_ap_password" value="__AP_PASSWORD__" maxlength="63">
-      <button type="submit">保存する</button>
-    </form>
-    <p class="status" id="ap-status"></p>
-  </div>
-
-  <script>
-  (function () {
-    var list = document.getElementById('net-list');
-    var ssidInput = document.getElementById('ssid');
-    list.querySelectorAll('.net-item').forEach(function (item) {
-      item.addEventListener('click', function () {
-        list.querySelectorAll('.net-item').forEach(function (i) { i.classList.remove('selected'); });
-        item.classList.add('selected');
-        ssidInput.value = item.dataset.ssid;
-      });
-    });
-
-    document.getElementById('wifi-form').addEventListener('submit', function (e) {
-      e.preventDefault();
-      var status = document.getElementById('wifi-status');
-      var ssid = ssidInput.value.trim();
-      if (!ssid) {
-        status.textContent = 'SSIDを入力してください';
-        return;
-      }
-      status.textContent = '接続を試みています…';
-
-      fetch('/wifi/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(document.getElementById('password').value)
-      })
-        .then(function () {
-          status.textContent = '送信しました。サイネージの画面を確認してください（この端末はまもなく切断されます）。';
-        })
-        .catch(function () {
-          status.textContent = '送信しました。この端末はまもなく切断されるため、以降の応答は確認できません。サイネージの画面を確認してください。';
-        });
-    });
-
-    document.getElementById('ap-form').addEventListener('submit', function (e) {
-      e.preventDefault();
-      var status = document.getElementById('ap-status');
-      status.textContent = '保存中…';
-      var body = 'setup_ap_ssid=' + encodeURIComponent(document.getElementById('ap-ssid').value) +
-                 '&setup_ap_password=' + encodeURIComponent(document.getElementById('ap-password').value);
-      fetch('/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-        body: body
-      })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          if (data.error) {
-            status.textContent = '保存に失敗しました: ' + data.error;
-          } else {
-            status.textContent = '保存しました（次回のセットアップモードから反映されます）';
-          }
-        })
-        .catch(function () {
-          status.textContent = '保存に失敗しました';
-        });
-    });
-  })();
-  </script>
-</body>
-</html>
-"""
-
-
-def render_network_items(networks):
-    items = []
-    for n in networks:
-        lock = "🔒" if n["security"] and n["security"] != "--" else ""
-        ssid_safe = _h(n["ssid"])
-        items.append(
-            f'<li class="net-item" data-ssid="{ssid_safe}">'
-            f'<span>{lock} {ssid_safe}</span>'
-            f'<span class="net-signal">{n["signal"]}%</span>'
-            f'</li>'
-        )
-    return "".join(items) if items else '<li class="hint">周辺のWi-Fiが見つかりませんでした</li>'
 
 
 def create_app(image_folder):
@@ -631,18 +483,6 @@ def create_app(image_folder):
                 return {"error": "invalid transition_type"}, 400
             updates["transition_type"] = ttype
 
-        if "setup_ap_ssid" in request.form:
-            ssid = request.form.get("setup_ap_ssid", "").strip()
-            if not (0 < len(ssid) <= 32):
-                return {"error": "invalid setup_ap_ssid"}, 400
-            updates["setup_ap_ssid"] = ssid
-
-        if "setup_ap_password" in request.form:
-            pw = request.form.get("setup_ap_password", "")
-            if pw != "" and not (8 <= len(pw) <= 63):
-                return {"error": "invalid setup_ap_password"}, 400
-            updates["setup_ap_password"] = pw
-
         if not updates:
             return {"error": "no valid fields"}, 400
 
@@ -651,8 +491,6 @@ def create_app(image_folder):
             "image_interval": DEFAULT_IMAGE_INTERVAL,
             "transition_type": DEFAULT_TRANSITION_TYPE,
             "rotation": DEFAULT_ROTATION,
-            "setup_ap_ssid": wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX),
-            "setup_ap_password": WIFI_SETUP_DEFAULT_PASSWORD,
         }
         result = signage_state.save_settings(image_folder, updates, defaults=defaults)
 
@@ -684,45 +522,6 @@ def create_app(image_folder):
             return {"rotation": new_rotation}, 200
 
         return redirect("/")
-
-    @app.route("/wifi", methods=["GET"])
-    def wifi_setup_page():
-        networks = wifi_setup.scan_networks()
-        ap_settings = signage_state.load_settings(image_folder, {
-            "setup_ap_ssid": wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX),
-            "setup_ap_password": WIFI_SETUP_DEFAULT_PASSWORD,
-        })
-
-        html = (WIFI_SETUP_PAGE
-                .replace("__NETWORK_ITEMS__", render_network_items(networks))
-                .replace("__AP_SSID__", _h(ap_settings.get("setup_ap_ssid", "")))
-                .replace("__AP_PASSWORD__", _h(ap_settings.get("setup_ap_password", ""))))
-        return html
-
-    @app.route("/wifi/connect", methods=["POST"])
-    def wifi_connect():
-        ssid = request.form.get("ssid", "").strip()
-        password = request.form.get("password", "")
-        if not ssid:
-            return {"error": "ssid is required"}, 400
-        if password and not (8 <= len(password) <= 63):
-            return {"error": "password must be 8-63 characters, or empty for open networks"}, 400
-
-        print(f"[wifi] 接続要求を受け付けました: SSID={ssid}")
-
-        def do_connect():
-            time.sleep(1)  # レスポンスをブラウザに返してから実行する
-            ok, out, err = wifi_setup.connect(ssid, password)
-            if ok:
-                print(f"[wifi] 接続成功: {out}")
-            else:
-                print(f"[wifi] 接続失敗: {err or out}")
-
-        threading.Thread(target=do_connect, daemon=True).start()
-
-        if request.headers.get("Accept") == "application/json":
-            return {"status": "connecting"}, 200
-        return redirect("/wifi")
 
     @app.route("/shutdown", methods=["POST"])
     def shutdown():
