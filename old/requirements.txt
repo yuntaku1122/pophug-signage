@@ -1,5 +1,0 @@
-pygame
-flask
-qrcode[pil]
-# gpiozero: Raspberry Pi実機のみ必要（GPIOボタン用）。Macでは未インストールでも動作します（QキーでQR表示を代用）
-gpiozero

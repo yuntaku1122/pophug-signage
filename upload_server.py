@@ -82,6 +82,13 @@ except ImportError:
     __version__ = "unknown"
 
 try:
+    from config import GITHUB_REPO as DEFAULT_GITHUB_REPO
+except ImportError:
+    DEFAULT_GITHUB_REPO = "yuntaku1122/pophug-signage"
+
+import update_check
+
+try:
     from flask import Flask, request, redirect, send_from_directory
 except ImportError:
     Flask = None
@@ -139,6 +146,9 @@ UPLOAD_PAGE = """
   .danger-box h1 { color:#c0392b; }
   .danger-box button { background:#c0392b; }
   .danger-box button:disabled { background:#e0a5a5; }
+  .update-changelog { font-size:13px; color:#333; white-space:pre-wrap; background:#f5f5f0;
+                       border-radius:8px; padding:12px; margin:10px 0; }
+  .btn-secondary { background:#555 !important; }
 </style>
 </head>
 <body>
@@ -331,6 +341,104 @@ UPLOAD_PAGE = """
 
     leftBtn.addEventListener('click', function () { rotate('left'); });
     rightBtn.addEventListener('click', function () { rotate('right'); });
+  })();
+  </script>
+
+  <div class="box" style="margin-top:16px;">
+    <h1>アップデート</h1>
+    <p class="hint" style="margin:0 0 12px;">現在のバージョン: v__CURRENT_VERSION__</p>
+    <button type="button" id="check-update-btn" class="btn-secondary">最新バージョンを確認</button>
+    <div id="update-info" style="display:none;">
+      <p class="update-changelog" id="update-changelog"></p>
+      <button type="button" id="apply-update-btn">アップデートする</button>
+    </div>
+    <p class="setting-status" id="update-status"></p>
+  </div>
+
+  <script>
+  (function () {
+    var checkBtn = document.getElementById('check-update-btn');
+    var applyBtn = document.getElementById('apply-update-btn');
+    var infoBox = document.getElementById('update-info');
+    var changelogEl = document.getElementById('update-changelog');
+    var status = document.getElementById('update-status');
+    var latestInfo = null;
+
+    checkBtn.addEventListener('click', function () {
+      status.textContent = '確認しています…';
+      infoBox.style.display = 'none';
+      checkBtn.disabled = true;
+
+      fetch('/update/check', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.error) {
+            status.textContent = '確認に失敗しました: ' + data.error;
+            return;
+          }
+          if (data.update_available) {
+            latestInfo = data;
+            changelogEl.textContent = 'v' + data.latest_version + '\\n\\n' + data.changelog;
+            infoBox.style.display = 'block';
+            status.textContent = '新しいバージョンがあります';
+          } else {
+            status.textContent = '最新版です（v' + data.current_version + '）';
+          }
+        })
+        .catch(function () {
+          status.textContent = '確認に失敗しました';
+        })
+        .finally(function () {
+          checkBtn.disabled = false;
+        });
+    });
+
+    applyBtn.addEventListener('click', function () {
+      if (!latestInfo) return;
+      var confirmed = window.confirm(
+        'v' + latestInfo.latest_version + ' にアップデートしますか？\\n' +
+        '数十秒〜数分かかり、完了すると自動的に再起動します。'
+      );
+      if (!confirmed) return;
+
+      applyBtn.disabled = true;
+      checkBtn.disabled = true;
+      status.textContent = 'アップデートしています…（この画面が反応しなくなったら再起動中です）';
+
+      fetch('/update/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+        body: 'tarball_url=' + encodeURIComponent(latestInfo.tarball_url) +
+              '&version=' + encodeURIComponent(latestInfo.latest_version)
+      })
+        .then(function () { pollUpdateStatus(0); })
+        .catch(function () { pollUpdateStatus(0); });
+    });
+
+    function pollUpdateStatus(attempt) {
+      if (attempt >= 60) {
+        status.textContent = '応答がありません。しばらくしてからページを再読み込みしてください。';
+        return;
+      }
+      fetch('/update/status', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.state === 'applying') {
+            status.textContent = 'アップデートしています…';
+            setTimeout(function () { pollUpdateStatus(attempt + 1); }, 2000);
+          } else if (data.state === 'failed') {
+            status.textContent = 'アップデートに失敗しました: ' + data.error;
+            applyBtn.disabled = false;
+            checkBtn.disabled = false;
+          } else {
+            setTimeout(function () { pollUpdateStatus(attempt + 1); }, 2000);
+          }
+        })
+        .catch(function () {
+          // サーバー再起動中で応答が無い＝更新が成功して再起動している可能性が高い
+          status.textContent = 'サーバーが再起動しているようです。しばらくしてからページを再読み込みしてください。';
+        });
+    }
   })();
   </script>
 
@@ -617,6 +725,7 @@ def create_app(image_folder):
                 .replace("__IMAGE_INTERVAL__", str(image_interval))
                 .replace("__TRANSITION_TYPE_OPTIONS__", render_transition_type_options(transition_type))
                 .replace("__ROTATION__", str(rotation))
+                .replace("__CURRENT_VERSION__", __version__)
                 .replace("__GALLERY__", gallery_html)
                 .replace("__VERSION__", __version__))
         return html
@@ -715,6 +824,44 @@ def create_app(image_folder):
             return {"rotation": new_rotation}, 200
 
         return redirect("/")
+
+    # アップデートの適用状況をスマホ側からポーリングで確認できるよう保持しておく
+    # （成功時はサービスごと再起動されるため、この変数自体が無くなる＝それも成功の合図になる）
+    update_status = {"state": "idle", "error": None}
+
+    @app.route("/update/check")
+    def update_check_route():
+        result = update_check.check_latest(DEFAULT_GITHUB_REPO)
+        return result
+
+    @app.route("/update/apply", methods=["POST"])
+    def update_apply_route():
+        tarball_url = request.form.get("tarball_url", "")
+        target_version = request.form.get("version", "")
+        if not tarball_url or not target_version:
+            return {"error": "invalid parameters"}, 400
+
+        print(f"[update] v{target_version} への更新要求を受け付けました")
+        update_status.update({"state": "applying", "error": None})
+
+        def do_update():
+            ok, msg = update_check.apply_update(tarball_url, target_version)
+            if ok:
+                print(f"[update] {msg}")
+                update_status.update({"state": "success", "error": None})
+            else:
+                print(f"[update] 失敗: {msg}")
+                update_status.update({"state": "failed", "error": msg})
+
+        threading.Thread(target=do_update, daemon=True).start()
+
+        if request.headers.get("Accept") == "application/json":
+            return {"status": "applying"}, 200
+        return redirect("/")
+
+    @app.route("/update/status")
+    def update_status_route():
+        return update_status
 
     @app.route("/wifi", methods=["GET"])
     def wifi_setup_page():

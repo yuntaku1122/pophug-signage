@@ -15,7 +15,9 @@
 | `upload_server.py` | iPhoneからの画像アップロード用Webサーバー（Flask） |
 | `signage_state.py` | 表示/非表示・トランジション速度などの状態（`images/.hidden.json`, `images/.settings.json`）の読み書き |
 | `wifi_setup.py` | Wi-Fiセットアップモード関連（SSID自動生成、QRペイロード生成、netctl呼び出し） |
+| `update_check.py` | アップデート確認・適用（GitHub Releases連携、ファイル入れ替え、ロールバック） |
 | `scripts/pophug-netctl` | root権限が必要なネットワーク操作だけを行う限定ヘルパー（要インストール、後述） |
+| `scripts/pophug-update-apply` | root権限が必要な更新の仕上げ（netctl入れ替え・サービス再起動）だけを行う限定ヘルパー（要インストール、後述） |
 | `version.py` | バージョン情報・変更履歴 |
 
 ## セットアップ
@@ -96,6 +98,53 @@ sudo visudo -c    # "parsed OK" と出れば設定完了
 接続）とその引数の形式を厳しく制限しているため、`*`で任意引数を許可していても、
 それ以上の任意コマンド実行はできない設計になっている。
 
+## アップデート機能（不特定多数への販売を見据えた配信の仕組み）
+
+お客さんのPiに開発者用のGit操作をしてもらわずに、**スマホの設定画面から更新できる**仕組み。
+GitHubの「Releases」機能をそのまま配信先として使う（本リポジトリは公開リポジトリである
+必要がある）。
+
+### 開発者側: 新バージョンをリリースする手順
+
+```bash
+# 1. version.pyの__version__とCHANGELOGを更新してコミット・push（通常の開発フローと同じ）
+git add -A
+git commit -m "..."
+git push
+
+# 2. タグを打ってpush
+git tag v4.4.0
+git push origin v4.4.0
+
+# 3. GitHub上でそのタグから「Release」を作成する（GitHubのWeb画面 or `gh release create v4.4.0`）
+#    本文にCHANGELOGの内容を書いておくと、お客さんのスマホ画面にそのまま表示される
+```
+
+これだけで完了。別途ビルドやパッケージのアップロードは不要（GitHubがタグの中身を
+自動的にアーカイブ化してくれる）。
+
+### お客さん側: 更新方法
+
+アップロードページの「アップデート」から「最新バージョンを確認」→（あれば）変更内容を見て
+「アップデートする」を押すだけ。`images/`フォルダと`venv/`は温存されるため、
+アップロード済みの写真や設定が消えることはない。新しいコードに明らかな不具合があれば
+自動的に元のバージョンへロールバックする。
+
+### インストール（Pi側で1回だけ必要）
+
+```bash
+sudo cp scripts/pophug-update-apply /usr/local/bin/
+sudo chmod 755 /usr/local/bin/pophug-update-apply
+sudo chown root:root /usr/local/bin/pophug-update-apply
+
+echo "pophug ALL=(ALL) NOPASSWD: /usr/local/bin/pophug-update-apply *" | sudo tee /etc/sudoers.d/pophug-update-apply
+sudo chmod 440 /etc/sudoers.d/pophug-update-apply
+sudo visudo -c
+```
+
+`config.py`の`GITHUB_REPO`（`"ユーザー名/リポジトリ名"`の形式）が、実際に使うリポジトリと
+一致していることを確認しておくこと。
+
 ## 動作環境
 
 - Mac: 検証用。pygameがPython 3.14に未対応のため、**Python 3.12系のvenv**で運用すること
@@ -115,6 +164,7 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
+| 4.4.0 | スマホから操作できるアップデート機能を追加。GitHub Releasesを配信先とし、自動ロールバック対応 |
 | 4.3.0 | Wi-Fi接続失敗の原因（netplan等で既に作られた壊れた接続プロファイルとの競合）を修正。スマホ側に接続の成功/失敗を実際に表示するように改善 |
 | 4.2.0 | Wi-Fiセットアップ画面に、設定ページ(/wifi)を直接開けるQRコードを追加。Wi-Fi接続用QRと2つ並べて表示 |
 | 4.1.0 | QRボタンにシャットダウン機能を追加（8秒以上長押し）。長押し判定を離した瞬間の合計時間基準に変更し、押している間は進捗を画面表示 |

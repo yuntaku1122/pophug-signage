@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+# ============================================
+# pophug-update-apply
+#
+# アップデート処理のうち、root権限が必要な最後の仕上げだけを行う
+# 限定ヘルパースクリプト。
+#   1. staging_dir/pophug-netctl があれば /usr/local/bin/pophug-netctl を置き換える
+#   2. pophug-signage.service を再起動する
+#
+# ファイルの展開・入れ替え・バックアップなど、それ以外の処理は
+# 全て非特権側(update_check.py)で行い、ここでは行わない。
+#
+# インストール:
+#   sudo cp scripts/pophug-update-apply /usr/local/bin/
+#   sudo chmod 755 /usr/local/bin/pophug-update-apply
+#   sudo chown root:root /usr/local/bin/pophug-update-apply
+# ============================================
+
+import os
+import shutil
+import subprocess
+import sys
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: pophug-update-apply <staging_dir>")
+
+    staging_dir = sys.argv[1]
+    if not os.path.isdir(staging_dir):
+        sys.exit(f"staging dir not found: {staging_dir}")
+
+    netctl_src = os.path.join(staging_dir, "pophug-netctl")
+    if os.path.isfile(netctl_src):
+        shutil.copy(netctl_src, "/usr/local/bin/pophug-netctl")
+        os.chmod("/usr/local/bin/pophug-netctl", 0o755)
+        shutil.chown("/usr/local/bin/pophug-netctl", user="root", group="root")
+        print("pophug-netctl updated")
+
+    r = subprocess.run(["systemctl", "restart", "pophug-signage.service"])
+    if r.returncode != 0:
+        sys.exit("failed to restart service")
+    print("service restarted")
+
+
+if __name__ == "__main__":
+    main()
