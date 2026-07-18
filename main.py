@@ -114,7 +114,9 @@ class PopSignage:
         self.wifi_setup_start_time = 0
         self.wifi_setup_ssid = ""
         self.wifi_setup_password = ""
-        self.wifi_setup_qr_surface = None
+        self.wifi_setup_qr_wifi = None     # ①: 直接Wi-Fiに繋がるQR
+        self.wifi_setup_qr_url = None      # ②: 設定ページを開くQR
+        self.wifi_setup_qr_labels = []
         self.wifi_setup_text_surfaces = []
         self.last_wifi_setup_check_time = 0
 
@@ -540,12 +542,8 @@ class PopSignage:
         self.wifi_setup_active = False
         log("通常モードに戻りました")
 
-    def _build_wifi_setup_surfaces(self):
-        """セットアップ画面に表示するQRコードと案内テキストを生成する"""
-        w = self.canvas.get_width()
-        h = self.canvas.get_height()
-
-        payload = wifi_setup.wifi_qr_payload(self.wifi_setup_ssid, self.wifi_setup_password)
+    def _make_qr_surface(self, payload, size):
+        """任意の文字列からQRコードのSurfaceを生成する共通ヘルパー"""
         qr_img = qrcode.QRCode(box_size=8, border=2)
         qr_img.add_data(payload)
         qr_img.make(fit=True)
@@ -554,18 +552,39 @@ class PopSignage:
         pil_img.save(buf, format="PNG")
         buf.seek(0)
         surface = pygame.image.load(buf)
-        size = int(min(w, h) * 0.4)
-        self.wifi_setup_qr_surface = pygame.transform.scale(surface, (size, size))
+        return pygame.transform.scale(surface, (size, size))
+
+    def _build_wifi_setup_surfaces(self):
+        """セットアップ画面に表示する2つのQRコード（①直接Wi-Fiに繋がるQRコード、
+        ②設定ページを開くQRコード）と案内テキストを生成する"""
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
+        setup_url = f"http://{wifi_setup.get_hotspot_ip()}:{UPLOAD_PORT}/wifi"
+
+        # 2つを横に並べても画面幅に収まるよう、幅から逆算してサイズを決める
+        gap = 16
+        qr_size = min((w - 48 - gap) // 2, int(h * 0.28))
+        qr_size = max(qr_size, 70)
+
+        wifi_payload = wifi_setup.wifi_qr_payload(self.wifi_setup_ssid, self.wifi_setup_password)
+        self.wifi_setup_qr_wifi = self._make_qr_surface(wifi_payload, qr_size)
+        self.wifi_setup_qr_url = self._make_qr_surface(setup_url, qr_size)
+
+        label_max_width = qr_size + 20
+        self.wifi_setup_qr_labels = [
+            self._render_fit_text("①Wi-Fiに接続", label_max_width, start_size=18, min_size=10,
+                                   color=(200, 200, 200)),
+            self._render_fit_text("②設定ページを開く", label_max_width, start_size=18, min_size=10,
+                                   color=(200, 200, 200)),
+        ]
 
         max_text_width = w - 48
-        setup_url = f"http://{wifi_setup.get_hotspot_ip()}:{UPLOAD_PORT}/wifi"
         lines = [
-            ("Wi-Fiセットアップモード", 30, (255, 255, 255)),
-            (f"SSID: {self.wifi_setup_ssid}", 24, (230, 230, 230)),
-            (f"パスワード: {self.wifi_setup_password}", 24, (230, 230, 230)),
-            ("↑QRコードを読み取るか、上記に手動接続後", 20, (200, 200, 200)),
-            (setup_url, 22, (150, 220, 150)),
-            ("を開いてください（ボタンでキャンセル）", 20, (200, 200, 200)),
+            ("Wi-Fiセットアップモード", 28, (255, 255, 255)),
+            (f"SSID: {self.wifi_setup_ssid}", 22, (230, 230, 230)),
+            (f"パスワード: {self.wifi_setup_password}", 22, (230, 230, 230)),
+            (setup_url, 18, (150, 220, 150)),
+            ("（ボタンでキャンセル）", 18, (200, 200, 200)),
         ]
         self.wifi_setup_text_surfaces = [
             self._render_fit_text(text, max_text_width, start_size=size, min_size=12, color=color)
@@ -573,28 +592,40 @@ class PopSignage:
         ]
 
     def draw_wifi_setup_screen(self):
-        """Wi-Fiセットアップモード中の画面を描画する"""
+        """Wi-Fiセットアップモード中の画面を描画する（①②2つのQRコードを並べて表示）"""
         w = self.canvas.get_width()
         h = self.canvas.get_height()
         self.canvas.fill((20, 20, 25))
 
-        qr = self.wifi_setup_qr_surface
-        if qr is None:
+        qr1 = self.wifi_setup_qr_wifi
+        qr2 = self.wifi_setup_qr_url
+        if qr1 is None or qr2 is None:
             return
 
-        white_bg = pygame.Surface((qr.get_width() + 24, qr.get_height() + 24))
-        white_bg.fill((255, 255, 255))
+        label1, label2 = self.wifi_setup_qr_labels
+        label_h = max(label1.get_height(), label2.get_height())
+        qr_gap = 16
 
         total_text_h = sum(s.get_height() + 8 for s in self.wifi_setup_text_surfaces)
-        total_h = qr.get_height() + 24 + total_text_h
+        total_h = qr1.get_height() + 10 + label_h + 20 + total_text_h
         top = max(10, h // 2 - total_h // 2)
 
-        qr_x = w // 2 - qr.get_width() // 2
+        pair_width = qr1.get_width() + qr_gap + qr2.get_width()
+        pair_x = w // 2 - pair_width // 2
         qr_y = top
-        self.canvas.blit(white_bg, (qr_x - 12, qr_y - 12))
-        self.canvas.blit(qr, (qr_x, qr_y))
 
-        y = qr_y + qr.get_height() + 24
+        for qr, x in ((qr1, pair_x), (qr2, pair_x + qr1.get_width() + qr_gap)):
+            white_bg = pygame.Surface((qr.get_width() + 20, qr.get_height() + 20))
+            white_bg.fill((255, 255, 255))
+            self.canvas.blit(white_bg, (x - 10, qr_y - 10))
+            self.canvas.blit(qr, (x, qr_y))
+
+        label_y = qr_y + qr1.get_height() + 10
+        self.canvas.blit(label1, (pair_x + qr1.get_width() // 2 - label1.get_width() // 2, label_y))
+        self.canvas.blit(label2, (
+            pair_x + qr1.get_width() + qr_gap + qr2.get_width() // 2 - label2.get_width() // 2, label_y))
+
+        y = label_y + label_h + 20
         for surf in self.wifi_setup_text_surfaces:
             self.canvas.blit(surf, (w // 2 - surf.get_width() // 2, y))
             y += surf.get_height() + 8
