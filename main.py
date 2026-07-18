@@ -10,6 +10,7 @@ import sys
 import random
 import time
 import io
+import subprocess
 import threading
 from datetime import datetime
 from config import *
@@ -281,34 +282,115 @@ class PopSignage:
     # ---------------- QRコード表示ボタン ----------------
 
     def setup_qr_button(self):
-        """ボタンの短押しでQRコード表示/非表示をトグル、長押しでWi-Fiセットアップモードに入る。
+        """ボタン1つで3段階の操作を行う。
+        短押し             : QRコード表示/非表示トグル
+        WIFI_SETUP_HOLD_SECONDS秒以上長押し : Wi-Fiセットアップモード
+        SHUTDOWN_HOLD_SECONDS秒以上長押し   : シャットダウン
+        判定は「離した瞬間の合計長押し時間」で行う（押している間は毎フレーム
+        run()から_poll_button()が呼ばれ、進捗を画面に表示する）。
         ラズパイ実機ではGPIOボタン、Mac等GPIOが無い環境では
-        Qキー(QR表示)・Wキー(Wi-Fiセットアップモード)で代用する。"""
-        self._button_long_pressed = False
+        Qキー(QR表示)・Wキー(Wi-Fiセットアップモード)・Sキー(シャットダウン)で代用する。"""
+        self._qr_button = None
+        self._button_press_start = None
         try:
             from gpiozero import Button
-            button = Button(QR_BUTTON_GPIO_PIN, pull_up=True, bounce_time=0.2,
-                             hold_time=WIFI_SETUP_HOLD_SECONDS)
-            button.when_held = self._on_button_held
-            button.when_released = self._on_button_released
-            self._qr_button = button  # ガベージコレクトされないよう保持
-            log(f"QRボタン待受け開始（GPIO{QR_BUTTON_GPIO_PIN}、"
-                f"長押し{WIFI_SETUP_HOLD_SECONDS}秒でWi-Fiセットアップモード）")
+            self._qr_button = Button(QR_BUTTON_GPIO_PIN, pull_up=True, bounce_time=0.2)
+            log(f"QRボタン待受け開始（GPIO{QR_BUTTON_GPIO_PIN}）: "
+                f"短押し=QR表示 / {WIFI_SETUP_HOLD_SECONDS}秒長押し=Wi-Fiセットアップ / "
+                f"{SHUTDOWN_HOLD_SECONDS}秒長押し=シャットダウン")
         except Exception as e:
             log(f"GPIOボタンが利用できません（{e}）。"
-                f"代わりにキーボードの[Q]キーでQR表示、[W]キーでWi-Fiセットアップモードを確認できます")
+                f"代わりにキーボードの[Q]キーでQR表示、[W]キーでWi-Fiセットアップ、"
+                f"[S]キーでシャットダウンを確認できます")
 
-    def _on_button_held(self):
-        """長押し閾値に達した時に呼ばれる（gpiozeroが押されている間に自動判定）"""
-        self._button_long_pressed = True
-        self.enter_wifi_setup_mode()
-
-    def _on_button_released(self):
-        """ボタンが離された時に呼ばれる。長押し判定済みなら短押し動作(QRトグル)は行わない。"""
-        if self._button_long_pressed:
-            self._button_long_pressed = False
+    def _poll_button(self):
+        """毎フレーム呼ばれ、物理ボタンの押下時間を監視する。gpiozeroのコールバックではなく
+        ポーリング方式にしているのは、長押し中の残り時間を画面に表示したいため。"""
+        if self._qr_button is None:
             return
-        self.toggle_qr_code()
+
+        now = time.time()
+        pressed = self._qr_button.is_pressed
+
+        if pressed and self._button_press_start is None:
+            self._button_press_start = now
+        elif not pressed and self._button_press_start is not None:
+            held = now - self._button_press_start
+            self._button_press_start = None
+            self._handle_button_release(held)
+
+    def _handle_button_release(self, held_seconds):
+        """ボタンが離された時、押していた時間に応じた動作を実行する"""
+        if self.wifi_setup_active:
+            # セットアップモード中は、押した時間に関わらずキャンセル操作として扱う
+            self.exit_wifi_setup_mode()
+            return
+
+        if held_seconds >= SHUTDOWN_HOLD_SECONDS:
+            self._trigger_button_shutdown()
+        elif held_seconds >= WIFI_SETUP_HOLD_SECONDS:
+            self.enter_wifi_setup_mode()
+        else:
+            self.toggle_qr_code()
+
+    def _trigger_button_shutdown(self):
+        """物理ボタンの長押しでシャットダウンを実行する（Web版と同じsudoersの許可を利用）"""
+        log("ボタン長押しによるシャットダウン要求を受け付けました")
+        self._hide_qr()
+
+        # すぐに反映されるよう、シャットダウン中である旨を1フレーム描画してからflipする
+        self.canvas.fill((10, 10, 10))
+        surf = self._render_fit_text(
+            "シャットダウンしています...", self.canvas.get_width() - 48,
+            start_size=30, min_size=16, color=(255, 120, 120))
+        self.canvas.blit(surf, (
+            self.canvas.get_width() // 2 - surf.get_width() // 2,
+            self.canvas.get_height() // 2 - surf.get_height() // 2))
+        if ROTATE_SCREEN:
+            rotated = pygame.transform.rotate(self.canvas, -ROTATE_SCREEN)
+            self.screen.blit(rotated, (0, 0))
+        else:
+            self.screen.blit(self.canvas, (0, 0))
+        pygame.display.flip()
+
+        def do_shutdown():
+            time.sleep(1)  # 画面の更新が確実に反映されてから実行する
+            try:
+                subprocess.run(SHUTDOWN_COMMAND, check=True, capture_output=True, text=True, timeout=15)
+            except Exception as e:
+                log(f"シャットダウンに失敗しました: {e}")
+
+        threading.Thread(target=do_shutdown, daemon=True).start()
+
+    def draw_button_hold_overlay(self):
+        """ボタンを押している最中、あとどれだけ押せば何が起きるかを画面に表示する"""
+        if self._button_press_start is None:
+            return
+        held = time.time() - self._button_press_start
+        if held < 0.6:
+            return  # QR表示用の短押しの邪魔をしないよう、少し経ってから表示する
+
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
+        overlay = pygame.Surface((w, h))
+        overlay.set_alpha(210)
+        overlay.fill((10, 10, 10))
+        self.canvas.blit(overlay, (0, 0))
+
+        if held >= SHUTDOWN_HOLD_SECONDS:
+            text = "離すとシャットダウンします"
+            color = (255, 90, 90)
+        elif held >= WIFI_SETUP_HOLD_SECONDS:
+            remaining = SHUTDOWN_HOLD_SECONDS - held
+            text = f"離すとWi-Fiセットアップモード（あと{remaining:.0f}秒でシャットダウン）"
+            color = (255, 210, 120)
+        else:
+            remaining = WIFI_SETUP_HOLD_SECONDS - held
+            text = f"長押し中...（あと{remaining:.1f}秒でWi-Fiセットアップ）"
+            color = (255, 255, 255)
+
+        surf = self._render_fit_text(text, w - 48, start_size=28, min_size=14, color=color)
+        self.canvas.blit(surf, (w // 2 - surf.get_width() // 2, h // 2 - surf.get_height() // 2))
 
     def toggle_qr_code(self):
         """QR表示中にもう一度押されたら即座に消す。非表示中なら新たに表示する。"""
@@ -624,6 +706,11 @@ class PopSignage:
                                 self.exit_wifi_setup_mode()
                             else:
                                 self.enter_wifi_setup_mode()
+                        if event.key == pygame.K_s:
+                            # Mac等、GPIOボタンが無い環境でのシャットダウン確認用
+                            self._trigger_button_shutdown()
+
+                self._poll_button()
 
                 now = time.time()
 
@@ -670,6 +757,7 @@ class PopSignage:
                     self.draw_pop_mode()
                     if self.qr_active:
                         self.draw_qr_overlay()
+                    self.draw_button_hold_overlay()
 
                 if ROTATE_SCREEN:
                     # pygame.transform.rotateは反時計回りが正の角度なので、

@@ -65,7 +65,11 @@ TRANSITION_TYPE_LABELS = {
 
 # シャットダウン実行コマンド。pophugユーザーがパスワード無しで実行できるよう
 # /etc/sudoers.d/pophug-shutdown で個別に許可しておく必要がある（README参照）。
-SHUTDOWN_COMMAND = ["sudo", "/sbin/shutdown", "-h", "now"]
+# main.py（ボタン長押し）とここ（Webボタン）で共通のコマンドを使うため、config.pyで一元管理する。
+try:
+    from config import SHUTDOWN_COMMAND
+except ImportError:
+    SHUTDOWN_COMMAND = ["sudo", "/sbin/shutdown", "-h", "now"]
 
 try:
     from config import ROTATE_SCREEN as DEFAULT_ROTATION
