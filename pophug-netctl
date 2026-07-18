@@ -94,6 +94,25 @@ def cmd_scan(args):
     print(r.stdout)
 
 
+def _delete_connections_for_ssid(ssid):
+    """指定SSIDに紐づく既存の接続プロファイルを探して削除する。
+    netplanなど別の仕組みで作られた不完全なプロファイルが残っていると、
+    'nmcli device wifi connect' がそれを使い回そうとして
+    '802-11-wireless-security.key-mgmt: property is missing' のような
+    エラーで失敗することがあるため、毎回まっさらな状態から接続し直す。"""
+    r = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"])
+    for line in r.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) < 2 or parts[1] != "802-11-wireless":
+            continue
+        name = parts[0]
+        if name == HOTSPOT_CON_NAME:
+            continue
+        ssid_check = run(["nmcli", "-g", "802-11-wireless.ssid", "connection", "show", name])
+        if ssid_check.stdout.strip() == ssid:
+            run(["nmcli", "connection", "delete", name])
+
+
 def cmd_connect(args):
     if len(args) != 2:
         sys.exit("usage: connect <ssid> <password>")
@@ -106,6 +125,8 @@ def cmd_connect(args):
     # Pi Zero 2Wは無線が1系統しか無いため、セットアップ用アクセスポイントと
     # 通常の子機接続を同時には維持できない。接続を試す前に一旦落とす。
     run(["nmcli", "connection", "down", HOTSPOT_CON_NAME])
+
+    _delete_connections_for_ssid(ssid)
 
     connect_cmd = ["nmcli", "device", "wifi", "connect", ssid]
     if password:

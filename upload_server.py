@@ -498,12 +498,39 @@ WIFI_SETUP_PAGE = """
         body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(document.getElementById('password').value)
       })
         .then(function () {
-          status.textContent = '送信しました。サイネージの画面を確認してください（この端末はまもなく切断されます）。';
+          pollWifiStatus(status, 0);
         })
         .catch(function () {
           status.textContent = '送信しました。この端末はまもなく切断されるため、以降の応答は確認できません。サイネージの画面を確認してください。';
         });
     });
+
+    function pollWifiStatus(status, attempt) {
+      // 失敗した場合はセットアップ用Wi-Fiに繋がったままなのでポーリングで結果を受け取れる。
+      // 成功した場合はPi側のネットワークが切り替わるため、途中でこの通信自体が
+      // 届かなくなる（＝それ自体が成功のサインになる）。
+      if (attempt >= 35) {
+        status.textContent = '応答が無くなりました。おそらく接続に成功し、この端末がセットアップ用Wi-Fiから切断されたためです。サイネージの画面を確認してください。';
+        return;
+      }
+      fetch('/wifi/status', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.state === 'connecting') {
+            status.textContent = '接続を試みています…（サイネージの画面を確認してください）';
+            setTimeout(function () { pollWifiStatus(status, attempt + 1); }, 1500);
+          } else if (data.state === 'failed') {
+            status.textContent = '接続に失敗しました: ' + data.error + ' もう一度お試しください。';
+          } else if (data.state === 'success') {
+            status.textContent = '接続に成功しました。サイネージの画面がスライドショーに戻っているか確認してください。';
+          } else {
+            setTimeout(function () { pollWifiStatus(status, attempt + 1); }, 1500);
+          }
+        })
+        .catch(function () {
+          status.textContent = '応答が無くなりました。おそらく接続に成功し、この端末がセットアップ用Wi-Fiから切断されたためです。サイネージの画面を確認してください。';
+        });
+    }
 
     document.getElementById('ap-form').addEventListener('submit', function (e) {
       e.preventDefault();
@@ -703,6 +730,12 @@ def create_app(image_folder):
                 .replace("__AP_PASSWORD__", _h(ap_settings.get("setup_ap_password", ""))))
         return html
 
+    # 接続試行の結果をスマホ側からポーリングで確認できるよう、プロセス内に保持しておく
+    # （失敗時はセットアップ用アクセスポイントに留まり続けるので、スマホ側はまだ繋がったまま
+    #  ポーリングでエラー内容を受け取れる。成功時はネットワークごと切り替わるため
+    #  ポーリング自体が届かなくなり、それ自体が「成功した合図」になる）
+    wifi_connect_status = {"state": "idle", "ssid": None, "error": None}
+
     @app.route("/wifi/connect", methods=["POST"])
     def wifi_connect():
         ssid = request.form.get("ssid", "").strip()
@@ -713,20 +746,28 @@ def create_app(image_folder):
             return {"error": "password must be 8-63 characters, or empty for open networks"}, 400
 
         print(f"[wifi] 接続要求を受け付けました: SSID={ssid}")
+        wifi_connect_status.update({"state": "connecting", "ssid": ssid, "error": None})
 
         def do_connect():
             time.sleep(1)  # レスポンスをブラウザに返してから実行する
             ok, out, err = wifi_setup.connect(ssid, password)
             if ok:
                 print(f"[wifi] 接続成功: {out}")
+                wifi_connect_status.update({"state": "success", "ssid": ssid, "error": None})
             else:
-                print(f"[wifi] 接続失敗: {err or out}")
+                error_message = err or out or "不明なエラー"
+                print(f"[wifi] 接続失敗: {error_message}")
+                wifi_connect_status.update({"state": "failed", "ssid": ssid, "error": error_message})
 
         threading.Thread(target=do_connect, daemon=True).start()
 
         if request.headers.get("Accept") == "application/json":
             return {"status": "connecting"}, 200
         return redirect("/wifi")
+
+    @app.route("/wifi/status")
+    def wifi_connect_status_route():
+        return wifi_connect_status
 
     @app.route("/shutdown", methods=["POST"])
     def shutdown():
