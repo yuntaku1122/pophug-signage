@@ -37,10 +37,17 @@ def main():
         shutil.chown("/usr/local/bin/pophug-netctl", user="root", group="root")
         print("pophug-netctl updated")
 
-    r = subprocess.run(["systemctl", "restart", "pophug-signage.service"])
+    # --no-block が重要: このスクリプト自身も元をたどれば
+    # pophug-signage.service から呼ばれた子プロセスなので、同じプロセスグループに
+    # 属している。素の"systemctl restart"（結果を待つ）だと、再起動処理が
+    # このスクリプト自身も巻き込んで強制終了させてしまい、「再起動コマンドが失敗した」
+    # と誤判定されて更新全体が不要にロールバックされる不具合があった。
+    # --no-block で「再起動の予約だけしてすぐ戻る」ようにすることで、
+    # 巻き込まれる前に正常終了できるようにする。
+    r = subprocess.run(["systemctl", "restart", "--no-block", "pophug-signage.service"])
     if r.returncode != 0:
-        sys.exit("failed to restart service")
-    print("service restarted")
+        sys.exit("failed to queue service restart")
+    print("service restart queued")
 
 
 if __name__ == "__main__":
