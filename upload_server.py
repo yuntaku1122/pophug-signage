@@ -447,6 +447,7 @@ UPLOAD_PAGE = """
 
   <div class="box" style="margin-top:16px;">
     <h1>ネットワーク</h1>
+    <p class="hint" style="margin:0 0 12px;">現在の接続方式: __NETWORK_MODE_LABEL__</p>
     <p class="hint" style="margin:0 0 12px;">出店先のWi-Fiを切り替えたい時はこちら</p>
     <a href="/wifi" style="display:block; text-align:center; padding:14px; background:#555;
        color:#fff; border-radius:8px; text-decoration:none; font-size:15px;">Wi-Fi設定を開く</a>
@@ -719,6 +720,13 @@ def create_app(image_folder):
         transition_type = settings.get("transition_type", DEFAULT_TRANSITION_TYPE)
         rotation = int(settings.get("rotation", DEFAULT_ROTATION)) % 360
 
+        network_mode_labels = {
+            "standalone": "スタンドアロン（本機がWi-Fiを提供中・外部ネット無し）",
+            "client": "外部Wi-Fiに接続中",
+            "none": "未接続",
+        }
+        network_mode_label = network_mode_labels.get(wifi_setup.current_network_mode(), "不明")
+
         html = (UPLOAD_PAGE
                 .replace("__MESSAGE__", message)
                 .replace("__COUNT__", str(len(files)))
@@ -729,6 +737,7 @@ def create_app(image_folder):
                 .replace("__TRANSITION_TYPE_OPTIONS__", render_transition_type_options(transition_type))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__CURRENT_VERSION__", __version__)
+                .replace("__NETWORK_MODE_LABEL__", network_mode_label)
                 .replace("__GALLERY__", gallery_html)
                 .replace("__VERSION__", __version__))
         return html

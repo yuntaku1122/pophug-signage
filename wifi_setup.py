@@ -96,6 +96,34 @@ def is_hotspot_active():
         return False
 
 
+def is_client_connected():
+    """wlan0が（自分専用のホットスポットではなく）通常のWi-Fiクライアントとして
+    どこかのネットワークに接続できているかを確認する（read-onlyなのでsudo不要）。
+    スタンドアロンモードへの自動移行判定に使う。"""
+    try:
+        r = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in r.stdout.splitlines():
+            parts = line.split(":")
+            if len(parts) >= 2 and parts[1] == "802-11-wireless" and parts[0] != HOTSPOT_CON_NAME:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def current_network_mode():
+    """現在の接続状態を 'standalone'（自分専用APで待機中） / 'client'（外部Wi-Fiに接続中） /
+    'none'（どちらでもない）のいずれかで返す。Webページでの状態表示に使う。"""
+    if is_hotspot_active():
+        return "standalone"
+    if is_client_connected():
+        return "client"
+    return "none"
+
+
 def get_hotspot_ip(default="10.42.0.1"):
     """アクセスポイントの実際のIPアドレスを取得する。
     NetworkManagerのshared接続は通常10.42.0.1になるが、

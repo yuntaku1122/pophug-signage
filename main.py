@@ -115,7 +115,7 @@ class PopSignage:
         self.manual_page_index = 0
         self.manual_page_start_time = 0
 
-        self.wifi_setup_active = False
+        self.wifi_setup_active = False   # 「接続情報の画面」を今表示しているか
         self.wifi_setup_start_time = 0
         self.wifi_setup_ssid = ""
         self.wifi_setup_password = ""
@@ -124,6 +124,10 @@ class PopSignage:
         self.wifi_setup_qr_labels = []
         self.wifi_setup_text_surfaces = []
         self.last_wifi_setup_check_time = 0
+
+        self.standalone_active = False   # 自分専用APを常時ホストしているか（画面には出ない裏方の状態）
+        # 起動直後は既知のWi-Fiへの接続を試す猶予を置いてから最初の判定を行う
+        self.last_standalone_check_time = time.time() - STANDALONE_CHECK_INTERVAL + STANDALONE_BOOT_GRACE_SECONDS
 
         self.load_pop_images(initial=True)
 
@@ -618,12 +622,21 @@ class PopSignage:
     # ---------------- Wi-Fiセットアップモード ----------------
 
     def enter_wifi_setup_mode(self):
-        """ボタン長押しで呼ばれる。Piが一時的な専用アクセスポイントを立て、
-        モニター/キーボード無しでもスマホだけでWi-Fi設定ができるようにする。"""
+        """ボタン長押しで呼ばれる。接続情報（QR・SSID・パスワード）の画面を表示する。
+        既にスタンドアロンモードでアクセスポイントが常時起動済みの場合は、
+        新たに立て直さず、その情報をそのまま表示するだけにする。"""
         if self.wifi_setup_active:
             return
 
         self.manual_active = False
+        self._hide_qr()
+
+        if self.standalone_active:
+            # 既にAPが常時起動しているので、情報表示だけ行う
+            self.wifi_setup_active = True
+            self.wifi_setup_start_time = time.time()
+            log("スタンドアロンモードの接続情報を表示します")
+            return
 
         settings = load_settings(IMAGE_FOLDER, {
             "setup_ap_ssid": wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX),
@@ -633,7 +646,6 @@ class PopSignage:
         password = settings.get("setup_ap_password", WIFI_SETUP_DEFAULT_PASSWORD)
 
         log(f"Wi-Fiセットアップモードへ切り替え中... SSID={ssid}")
-        self._hide_qr()
 
         ok, out, err = wifi_setup.start_hotspot(ssid, password)
         if not ok:
@@ -648,13 +660,45 @@ class PopSignage:
         log("Wi-Fiセットアップモードに入りました（ボタンを押すとキャンセルできます）")
 
     def exit_wifi_setup_mode(self):
-        """セットアップモードを明示的に終了し、アクセスポイントを閉じて通常運用に戻る"""
+        """接続情報の画面を閉じる。スタンドアロンモード中はアクセスポイント自体は
+        維持したまま画面だけ通常表示に戻す。それ以外（一時的な新規設定中）は
+        アクセスポイントごと終了する。"""
         if not self.wifi_setup_active:
             return
+        self.wifi_setup_active = False
+
+        if self.standalone_active:
+            log("接続情報表示を閉じました（スタンドアロンのアクセスポイントは維持されます）")
+            return
+
         log("Wi-Fiセットアップモードを終了しています...")
         wifi_setup.stop_hotspot()
-        self.wifi_setup_active = False
         log("通常モードに戻りました")
+
+    def _enter_standalone_mode(self):
+        """外部Wi-Fiが見つからない時に自動的に呼ばれる。自分専用のアクセスポイントを
+        画面には出さず裏側で常時起動しておき、ボタンが押された時だけ接続情報を表示する。"""
+        if self.standalone_active or self.wifi_setup_active:
+            return
+
+        settings = load_settings(IMAGE_FOLDER, {
+            "setup_ap_ssid": wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX),
+            "setup_ap_password": WIFI_SETUP_DEFAULT_PASSWORD,
+        })
+        ssid = settings.get("setup_ap_ssid") or wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX)
+        password = settings.get("setup_ap_password", WIFI_SETUP_DEFAULT_PASSWORD)
+
+        log(f"既知のWi-Fiが見つからないため、スタンドアロンモードへ移行します。SSID={ssid}")
+        ok, out, err = wifi_setup.start_hotspot(ssid, password)
+        if not ok:
+            log(f"スタンドアロン用アクセスポイントの起動に失敗しました: {err or out}")
+            return
+
+        self.standalone_active = True
+        self.wifi_setup_ssid = ssid
+        self.wifi_setup_password = password
+        self._build_wifi_setup_surfaces()
+        log("スタンドアロンモードで待機中（画面は通常表示のまま、ボタン長押しで接続情報を表示できます）")
 
     def _make_qr_surface(self, payload, size):
         """任意の文字列からQRコードのSurfaceを生成する共通ヘルパー"""
@@ -693,12 +737,18 @@ class PopSignage:
         ]
 
         max_text_width = w - 48
+        if self.standalone_active:
+            title_text = "スタンドアロンモード（外部Wi-Fi無し）"
+            close_text = "（ボタンで閉じる。アクセスポイントは維持されます）"
+        else:
+            title_text = "Wi-Fiセットアップモード"
+            close_text = "（ボタンでキャンセル）"
         lines = [
-            ("Wi-Fiセットアップモード", 28, (255, 255, 255)),
+            (title_text, 26, (255, 255, 255)),
             (f"SSID: {self.wifi_setup_ssid}", 22, (230, 230, 230)),
             (f"パスワード: {self.wifi_setup_password}", 22, (230, 230, 230)),
             (setup_url, 18, (150, 220, 150)),
-            ("（ボタンでキャンセル）", 18, (200, 200, 200)),
+            (close_text, 18, (200, 200, 200)),
         ]
         self.wifi_setup_text_surfaces = [
             self._render_fit_text(text, max_text_width, start_size=size, min_size=12, color=color)
@@ -886,17 +936,32 @@ class PopSignage:
                     self.last_scan_time = now
                     self.load_pop_images()
 
-                if self.wifi_setup_active:
+                if self.wifi_setup_active or self.standalone_active:
                     # 2秒おきに、外部(Web側の接続操作)によってアクセスポイントが
                     # 既に落とされていないか・タイムアウトしていないかを確認する
                     if now - self.last_wifi_setup_check_time >= 2:
                         self.last_wifi_setup_check_time = now
                         if not wifi_setup.is_hotspot_active():
-                            log("Wi-Fi接続が完了したようです。通常モードに戻ります")
+                            # 外部要因(Web側での接続成功など)でアクセスポイントが終了した
+                            if self.standalone_active:
+                                log("アクセスポイントが終了したため、スタンドアロンモードを終了します")
+                            elif self.wifi_setup_active:
+                                log("Wi-Fi接続が完了したようです。通常モードに戻ります")
+                            self.standalone_active = False
                             self.wifi_setup_active = False
-                        elif now - self.wifi_setup_start_time >= WIFI_SETUP_TIMEOUT_SECONDS:
-                            log("Wi-Fiセットアップモードがタイムアウトしました。通常モードに戻ります")
+                        elif self.wifi_setup_active and now - self.wifi_setup_start_time >= WIFI_SETUP_TIMEOUT_SECONDS:
+                            log("接続情報の表示がタイムアウトしました")
                             self.exit_wifi_setup_mode()
+
+                # 知っているWi-Fiが見つからない場合、自動的にスタンドアロンモードへ移行する。
+                # 起動直後は少し待ってから最初の判定を行い、以後は定期的に再判定する
+                # （途中でWi-Fi接続が切れた場合の検知も兼ねる）。
+                if (STANDALONE_AUTO_ENABLED and not self.wifi_setup_active
+                        and not self.standalone_active
+                        and now - self.last_standalone_check_time >= STANDALONE_CHECK_INTERVAL):
+                    self.last_standalone_check_time = now
+                    if not wifi_setup.is_client_connected():
+                        self._enter_standalone_mode()
 
                 if self.wifi_setup_active:
                     self.draw_wifi_setup_screen()
