@@ -17,6 +17,7 @@ from config import *
 from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime
 from version import __version__
 import wifi_setup
+from manual import MANUAL_PAGES
 
 try:
     import qrcode
@@ -109,6 +110,10 @@ class PopSignage:
         self.qr_url_surface = None
         self.qr_url = ""
         self._qr_pause_start = None   # QR表示開始時刻（スライドショー一時停止分の巻き戻しに使う）
+
+        self.manual_active = False    # ボタン長押しで手動表示中かどうか
+        self.manual_page_index = 0
+        self.manual_page_start_time = 0
 
         self.wifi_setup_active = False
         self.wifi_setup_start_time = 0
@@ -284,26 +289,28 @@ class PopSignage:
     # ---------------- QRコード表示ボタン ----------------
 
     def setup_qr_button(self):
-        """ボタン1つで3段階の操作を行う。
+        """ボタン1つで4段階の操作を行う。
         短押し             : QRコード表示/非表示トグル
+        MANUAL_HOLD_SECONDS秒以上長押し     : 取扱説明を表示
         WIFI_SETUP_HOLD_SECONDS秒以上長押し : Wi-Fiセットアップモード
         SHUTDOWN_HOLD_SECONDS秒以上長押し   : シャットダウン
         判定は「離した瞬間の合計長押し時間」で行う（押している間は毎フレーム
         run()から_poll_button()が呼ばれ、進捗を画面に表示する）。
         ラズパイ実機ではGPIOボタン、Mac等GPIOが無い環境では
-        Qキー(QR表示)・Wキー(Wi-Fiセットアップモード)・Sキー(シャットダウン)で代用する。"""
+        Qキー(QR表示)・Mキー(取扱説明)・Wキー(Wi-Fiセットアップモード)・Sキー(シャットダウン)で代用する。"""
         self._qr_button = None
         self._button_press_start = None
         try:
             from gpiozero import Button
             self._qr_button = Button(QR_BUTTON_GPIO_PIN, pull_up=True, bounce_time=0.2)
             log(f"QRボタン待受け開始（GPIO{QR_BUTTON_GPIO_PIN}）: "
-                f"短押し=QR表示 / {WIFI_SETUP_HOLD_SECONDS}秒長押し=Wi-Fiセットアップ / "
+                f"短押し=QR表示 / {MANUAL_HOLD_SECONDS}秒長押し=取扱説明 / "
+                f"{WIFI_SETUP_HOLD_SECONDS}秒長押し=Wi-Fiセットアップ / "
                 f"{SHUTDOWN_HOLD_SECONDS}秒長押し=シャットダウン")
         except Exception as e:
             log(f"GPIOボタンが利用できません（{e}）。"
-                f"代わりにキーボードの[Q]キーでQR表示、[W]キーでWi-Fiセットアップ、"
-                f"[S]キーでシャットダウンを確認できます")
+                f"代わりにキーボードの[Q]キーでQR表示、[M]キーで取扱説明、"
+                f"[W]キーでWi-Fiセットアップ、[S]キーでシャットダウンを確認できます")
 
     def _poll_button(self):
         """毎フレーム呼ばれ、物理ボタンの押下時間を監視する。gpiozeroのコールバックではなく
@@ -328,10 +335,17 @@ class PopSignage:
             self.exit_wifi_setup_mode()
             return
 
+        if self.manual_active:
+            # 取扱説明の表示中は、押した時間に関わらず閉じる操作として扱う
+            self.toggle_manual()
+            return
+
         if held_seconds >= SHUTDOWN_HOLD_SECONDS:
             self._trigger_button_shutdown()
         elif held_seconds >= WIFI_SETUP_HOLD_SECONDS:
             self.enter_wifi_setup_mode()
+        elif held_seconds >= MANUAL_HOLD_SECONDS:
+            self.toggle_manual()
         else:
             self.toggle_qr_code()
 
@@ -339,6 +353,7 @@ class PopSignage:
         """物理ボタンの長押しでシャットダウンを実行する（Web版と同じsudoersの許可を利用）"""
         log("ボタン長押しによるシャットダウン要求を受け付けました")
         self._hide_qr()
+        self.manual_active = False
 
         # すぐに反映されるよう、シャットダウン中である旨を1フレーム描画してからflipする
         self.canvas.fill((10, 10, 10))
@@ -386,9 +401,13 @@ class PopSignage:
             remaining = SHUTDOWN_HOLD_SECONDS - held
             text = f"離すとWi-Fiセットアップモード（あと{remaining:.0f}秒でシャットダウン）"
             color = (255, 210, 120)
-        else:
+        elif held >= MANUAL_HOLD_SECONDS:
             remaining = WIFI_SETUP_HOLD_SECONDS - held
-            text = f"長押し中...（あと{remaining:.1f}秒でWi-Fiセットアップ）"
+            text = f"離すと取扱説明を表示（あと{remaining:.0f}秒でWi-Fiセットアップ）"
+            color = (150, 210, 255)
+        else:
+            remaining = MANUAL_HOLD_SECONDS - held
+            text = f"長押し中...（あと{remaining:.1f}秒で取扱説明）"
             color = (255, 255, 255)
 
         surf = self._render_fit_text(text, w - 48, start_size=28, min_size=14, color=color)
@@ -503,6 +522,88 @@ class PopSignage:
         url_y = label_y + label.get_height() + 10
         self.canvas.blit(url_s, (w // 2 - url_s.get_width() // 2, url_y))
 
+    # ---------------- 取扱説明モード ----------------
+
+    def toggle_manual(self):
+        """ボタンの中段長押しで、取扱説明の表示/非表示をトグルする"""
+        if self.manual_active:
+            self.manual_active = False
+            log("取扱説明を非表示にしました")
+        else:
+            self._hide_qr()
+            self.manual_active = True
+            self.manual_page_index = 0
+            self.manual_page_start_time = time.time()
+            log("取扱説明を表示しました")
+
+    @staticmethod
+    def _wrap_text_lines(text, font, max_width):
+        """1行のテキストを、指定フォント・幅に収まるよう1文字ずつ折り返す
+        （日本語は単語間にスペースが無いため、文字単位での折り返しが適切）"""
+        wrapped = []
+        current = ""
+        for ch in text:
+            test = current + ch
+            if font.size(test)[0] > max_width and current:
+                wrapped.append(current)
+                current = ch
+            else:
+                current = test
+        if current:
+            wrapped.append(current)
+        return wrapped
+
+    def draw_manual_screen(self):
+        """取扱説明の現在のページを描画し、一定時間ごとに自動でページ送りする。
+        （写真が1枚も無い時の自動表示、ボタン長押しでの手動表示、両方から呼ばれる）"""
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
+        self.canvas.fill((24, 24, 30))
+
+        if not MANUAL_PAGES:
+            return
+
+        now = time.time()
+        if now - self.manual_page_start_time >= MANUAL_PAGE_SECONDS:
+            self.manual_page_start_time = now
+            self.manual_page_index = (self.manual_page_index + 1) % len(MANUAL_PAGES)
+
+        page = MANUAL_PAGES[self.manual_page_index % len(MANUAL_PAGES)]
+        max_width = w - 64
+
+        title_surf = self._render_fit_text(
+            page["title"], max_width, start_size=32, min_size=18, color=(255, 210, 110))
+
+        body_font = get_japanese_font(22)
+        body_surfaces = []
+        for raw_line in page["body"].split("\n"):
+            if not raw_line:
+                body_surfaces.append(None)  # 空行は余白として扱う
+                continue
+            for wrapped_line in self._wrap_text_lines(raw_line, body_font, max_width):
+                body_surfaces.append(body_font.render(wrapped_line, True, (225, 225, 225)))
+
+        footer_surf = self._render_fit_text(
+            f"{self.manual_page_index + 1} / {len(MANUAL_PAGES)}　（ボタンで閉じる）",
+            max_width, start_size=16, min_size=11, color=(150, 150, 150))
+
+        total_h = title_surf.get_height() + 26
+        for s in body_surfaces:
+            total_h += (s.get_height() if s is not None else 12) + 8
+
+        y = max(20, h // 2 - total_h // 2)
+        self.canvas.blit(title_surf, (w // 2 - title_surf.get_width() // 2, y))
+        y += title_surf.get_height() + 26
+
+        for s in body_surfaces:
+            if s is None:
+                y += 12
+                continue
+            self.canvas.blit(s, (w // 2 - s.get_width() // 2, y))
+            y += s.get_height() + 8
+
+        self.canvas.blit(footer_surf, (w // 2 - footer_surf.get_width() // 2, h - footer_surf.get_height() - 20))
+
     # ---------------- Wi-Fiセットアップモード ----------------
 
     def enter_wifi_setup_mode(self):
@@ -510,6 +611,8 @@ class PopSignage:
         モニター/キーボード無しでもスマホだけでWi-Fi設定ができるようにする。"""
         if self.wifi_setup_active:
             return
+
+        self.manual_active = False
 
         settings = load_settings(IMAGE_FOLDER, {
             "setup_ap_ssid": wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX),
@@ -639,12 +742,9 @@ class PopSignage:
             next_idx = self.next_pop_index
 
         if not images:
-            self.canvas.fill((30, 30, 30))
-            text = self.font_medium.render("画像がありません", True, (255, 255, 255))
-            self.canvas.blit(text, (
-                self.canvas.get_width() // 2 - text.get_width() // 2,
-                self.canvas.get_height() // 2
-            ))
+            # 写真が1枚も無い（＝購入直後の無垢な状態）場合は、
+            # 「画像がありません」ではなく取扱説明を自動的にループ表示する
+            self.draw_manual_screen()
             return
 
         if self.qr_active:
@@ -731,6 +831,9 @@ class PopSignage:
                         if event.key == pygame.K_q:
                             # Mac等、GPIOボタンが無い環境での動作確認用
                             self.toggle_qr_code()
+                        if event.key == pygame.K_m:
+                            # Mac等、GPIOボタンが無い環境での取扱説明確認用
+                            self.toggle_manual()
                         if event.key == pygame.K_w:
                             # Mac等、GPIOボタンが無い環境でのWi-Fiセットアップモード確認用
                             if self.wifi_setup_active:
@@ -784,6 +887,8 @@ class PopSignage:
 
                 if self.wifi_setup_active:
                     self.draw_wifi_setup_screen()
+                elif self.manual_active:
+                    self.draw_manual_screen()
                 else:
                     self.draw_pop_mode()
                     if self.qr_active:
