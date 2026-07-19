@@ -9,3 +9,4 @@ __pycache__/
 # アップロードされたPOP画像・表示状態（実行時に生成されるデータのため管理対象外）
 images/.hidden.json
 
+images/
