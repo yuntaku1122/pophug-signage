@@ -50,6 +50,11 @@ except ImportError:
     DEFAULT_TRANSITION_TYPE = "fade"
 
 try:
+    from config import PRIORITY_INTERVAL as DEFAULT_PRIORITY_INTERVAL
+except ImportError:
+    DEFAULT_PRIORITY_INTERVAL = 5
+
+try:
     from config import WIFI_SETUP_SSID_PREFIX, WIFI_SETUP_DEFAULT_PASSWORD
 except ImportError:
     WIFI_SETUP_SSID_PREFIX = "pophug-setup"
@@ -113,7 +118,7 @@ UPLOAD_PAGE = """
   .msg { color:#228b22; font-weight:bold; }
   .gallery { display:grid; grid-template-columns:repeat(2, 1fr); gap:12px; margin-top:4px; }
   .item { background:#fff; border-radius:10px; overflow:hidden; box-shadow:0 2px 6px rgba(0,0,0,0.08);
-          transition:opacity .2s; }
+          transition:opacity .2s; position:relative; }
   .item img { width:100%; height:140px; object-fit:cover; display:block; }
   .item.is-hidden img { opacity:0.3; filter:grayscale(100%); }
   .switch-row { display:flex; align-items:center; gap:10px; padding:10px 12px; }
@@ -130,6 +135,10 @@ UPLOAD_PAGE = """
   .delete-btn { width:100%; padding:8px; margin-top:4px; background:#fff; color:#c0392b;
                 border:1px solid #e0a5a5; border-radius:6px; font-size:12px; }
   .delete-btn:disabled { color:#ccc; border-color:#eee; }
+  .priority-select { width:100%; padding:6px; margin-top:4px; border:1px solid #ccc;
+                      border-radius:6px; font-size:12px; background:#fff; }
+  .priority-badge { position:absolute; top:8px; left:8px; background:#e67e22; color:#fff;
+                     font-size:11px; padding:3px 8px; border-radius:10px; }
   .setting-row { margin-top:16px; }
   .setting-row label { font-size:14px; color:#333; display:flex; justify-content:space-between; }
   .setting-row input[type=range] { width:100%; margin:10px 0 4px; accent-color:#228b22; }
@@ -189,6 +198,20 @@ UPLOAD_PAGE = """
         __TRANSITION_TYPE_OPTIONS__
       </select>
       <p class="setting-status" id="transition-type-status"></p>
+    </div>
+  </div>
+
+  <div class="box" style="margin-top:16px;">
+    <h1>優先表示</h1>
+    <p class="hint" style="margin:0 0 12px;">写真ごとに「優先表示1」「優先表示2」を設定すると、
+      通常の写真からは外れ、指定した枚数ごとにまとめて割り込み表示されます。
+      店のロゴやメニュー一覧を定期的に見せたい時に使えます。</p>
+    <div class="setting-row">
+      <label>通常の写真を何枚表示するごとに割り込ませるか
+        <span id="priority-interval-value">__PRIORITY_INTERVAL__</span>枚ごと</label>
+      <input type="range" id="priority-interval-slider" min="1" max="20" step="1"
+             value="__PRIORITY_INTERVAL__">
+      <p class="setting-status" id="priority-interval-status"></p>
     </div>
   </div>
 
@@ -277,6 +300,49 @@ UPLOAD_PAGE = """
         });
     });
   });
+
+  document.querySelectorAll('.priority-select').forEach(function (select) {
+    select.addEventListener('change', function () {
+      var filename = this.dataset.filename;
+      var tag = this.value;
+      var item = document.getElementById('item-' + filename);
+      var previousTag = this.dataset.currentTag || 'normal';
+      select.disabled = true;
+
+      fetch('/priority', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'filename=' + encodeURIComponent(filename) + '&tag=' + encodeURIComponent(tag)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          select.disabled = false;
+          if (data.error) {
+            select.value = previousTag;
+            return;
+          }
+          select.dataset.currentTag = tag;
+          var existingBadge = item.querySelector('.priority-badge');
+          if (existingBadge) {
+            existingBadge.remove();
+          }
+          if (tag !== 'normal') {
+            var labels = { priority1: '優先表示1', priority2: '優先表示2' };
+            var badge = document.createElement('span');
+            badge.className = 'priority-badge';
+            badge.textContent = labels[tag] || tag;
+            item.insertBefore(badge, item.querySelector('.switch-row'));
+          }
+        })
+        .catch(function () {
+          select.disabled = false;
+          select.value = previousTag;
+        });
+    });
+  });
   </script>
 
   <script>
@@ -316,6 +382,8 @@ UPLOAD_PAGE = """
 
   setupSlider('transition-slider', 'transition-value', 'transition-status', 'transition_duration', 1);
   setupSlider('interval-slider', 'interval-value', 'interval-status', 'image_interval', 0);
+  setupSlider('priority-interval-slider', 'priority-interval-value', 'priority-interval-status',
+              'priority_interval', 0);
 
   function setupSelect(selectId, statusId, fieldName) {
     var select = document.getElementById(selectId);
@@ -545,13 +613,29 @@ UPLOAD_PAGE = """
 """
 
 
-def render_gallery_item(filename, is_hidden):
+PRIORITY_LABELS = {
+    "normal": "通常",
+    "priority1": "優先表示1",
+    "priority2": "優先表示2",
+}
+
+
+def render_gallery_item(filename, is_hidden, priority_tag):
     state_class = "is-hidden" if is_hidden else ""
     checked_attr = "" if is_hidden else "checked"
     label_text = "非表示中" if is_hidden else "表示中"
+    current_tag = priority_tag if priority_tag in PRIORITY_LABELS else "normal"
+    options = "".join(
+        f'<option value="{value}"{" selected" if value == current_tag else ""}>{label}</option>'
+        for value, label in PRIORITY_LABELS.items()
+    )
+    badge = ""
+    if current_tag != "normal":
+        badge = f'<span class="priority-badge">{PRIORITY_LABELS[current_tag]}</span>'
     return f"""
     <div class="item {state_class}" id="item-{filename}">
       <img src="/img/{filename}" loading="lazy">
+      {badge}
       <div class="switch-row">
         <label class="switch">
           <input type="checkbox" class="toggle-cb" data-filename="{filename}" {checked_attr}>
@@ -559,6 +643,9 @@ def render_gallery_item(filename, is_hidden):
         </label>
         <span class="switch-label">{label_text}</span>
       </div>
+      <select class="priority-select" data-filename="{filename}" data-current-tag="{current_tag}">
+        {options}
+      </select>
       <button type="button" class="delete-btn" data-filename="{filename}">削除</button>
     </div>
     """
@@ -750,19 +837,25 @@ def create_app(image_folder):
 
         files = list_images()
         hidden = signage_state.load_hidden(image_folder)
+        priority_map = signage_state.load_priority(image_folder)
         visible_count = len([f for f in files if f not in hidden])
-        gallery_html = "".join(render_gallery_item(f, f in hidden) for f in reversed(files))
+        gallery_html = "".join(
+            render_gallery_item(f, f in hidden, priority_map.get(f, "normal"))
+            for f in reversed(files)
+        )
 
         settings = signage_state.load_settings(image_folder, {
             "transition_duration": DEFAULT_TRANSITION_DURATION,
             "image_interval": DEFAULT_IMAGE_INTERVAL,
             "transition_type": DEFAULT_TRANSITION_TYPE,
             "rotation": DEFAULT_ROTATION,
+            "priority_interval": DEFAULT_PRIORITY_INTERVAL,
         })
         transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
         image_interval = int(round(float(settings.get("image_interval", DEFAULT_IMAGE_INTERVAL))))
         transition_type = settings.get("transition_type", DEFAULT_TRANSITION_TYPE)
         rotation = int(settings.get("rotation", DEFAULT_ROTATION)) % 360
+        priority_interval = int(round(float(settings.get("priority_interval", DEFAULT_PRIORITY_INTERVAL))))
 
         network_mode_labels = {
             "standalone": "スタンドアロン（本機がWi-Fiを提供中・外部ネット無し）",
@@ -779,6 +872,7 @@ def create_app(image_folder):
                 .replace("__TRANSITION_DURATION__", transition_duration)
                 .replace("__IMAGE_INTERVAL__", str(image_interval))
                 .replace("__TRANSITION_TYPE_OPTIONS__", render_transition_type_options(transition_type))
+                .replace("__PRIORITY_INTERVAL__", str(priority_interval))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__CURRENT_VERSION__", __version__)
                 .replace("__NETWORK_MODE_LABEL__", network_mode_label)
@@ -839,6 +933,30 @@ def create_app(image_folder):
 
         return redirect("/")
 
+    @app.route("/priority", methods=["POST"])
+    def set_priority():
+        filename = request.form.get("filename", "")
+        tag = request.form.get("tag", "normal")
+
+        safe_name = os.path.basename(filename)
+        if not filename or safe_name != filename:
+            return {"error": "invalid filename"}, 400
+
+        path = os.path.join(image_folder, safe_name)
+        if not os.path.isfile(path):
+            return {"error": "file not found"}, 404
+
+        if tag not in ("normal", "priority1", "priority2"):
+            return {"error": "invalid tag"}, 400
+
+        signage_state.set_priority_tag(image_folder, safe_name, tag)
+        print(f"[priority] {safe_name} を「{PRIORITY_LABELS.get(tag, tag)}」に設定しました")
+
+        if request.headers.get("Accept") == "application/json":
+            return {"filename": safe_name, "tag": tag}, 200
+
+        return redirect("/")
+
     @app.route("/settings", methods=["POST"])
     def update_settings():
         updates = {}
@@ -856,6 +974,13 @@ def create_app(image_folder):
             except (TypeError, ValueError):
                 return {"error": "invalid image_interval"}, 400
             updates["image_interval"] = round(max(2.0, min(interval, 60.0)), 1)
+
+        if "priority_interval" in request.form:
+            try:
+                p_interval = int(float(request.form.get("priority_interval")))
+            except (TypeError, ValueError):
+                return {"error": "invalid priority_interval"}, 400
+            updates["priority_interval"] = max(1, min(p_interval, 50))
 
         if "transition_type" in request.form:
             ttype = request.form.get("transition_type")
@@ -883,6 +1008,7 @@ def create_app(image_folder):
             "image_interval": DEFAULT_IMAGE_INTERVAL,
             "transition_type": DEFAULT_TRANSITION_TYPE,
             "rotation": DEFAULT_ROTATION,
+            "priority_interval": DEFAULT_PRIORITY_INTERVAL,
             "setup_ap_ssid": wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX),
             "setup_ap_password": WIFI_SETUP_DEFAULT_PASSWORD,
         }

@@ -113,3 +113,58 @@ def settings_mtime(image_folder):
         return os.path.getmtime(path)
     except OSError:
         return None
+
+
+# ---------------- 優先表示タグ ----------------
+# アップロードページで「優先表示1」「優先表示2」に設定した画像のファイル名を
+# images/.priority.json に {ファイル名: "priority1"/"priority2"} の形で保存する。
+# main.py側は、通常の画像を一定枚数表示するごとに、優先表示に設定された画像を
+# まとめて割り込ませる（店のロゴ・メニュー一覧などを定期的に挟み込む用途）。
+
+PRIORITY_TAGS = ("priority1", "priority2")
+
+
+def _priority_path(image_folder):
+    return os.path.join(image_folder, ".priority.json")
+
+
+def load_priority(image_folder):
+    """{ファイル名: "priority1"/"priority2"} の辞書を返す（タグが無いファイルは含まれない）"""
+    path = _priority_path(image_folder)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # 万一ファイルが壊れて不正な値が入っていても無視する
+        return {k: v for k, v in data.items() if v in PRIORITY_TAGS}
+    except Exception:
+        return {}
+
+
+def save_priority(image_folder, priority_map):
+    path = _priority_path(image_folder)
+    with _lock:
+        _atomic_write_json(path, priority_map)
+
+
+def set_priority_tag(image_folder, filename, tag):
+    """指定ファイルの優先表示タグを設定する。
+    tagが None/""/"normal" の場合はタグを削除して「通常」に戻す。
+    設定後のpriority_mapを返す。"""
+    priority_map = load_priority(image_folder)
+    if tag not in PRIORITY_TAGS:
+        priority_map.pop(filename, None)
+    else:
+        priority_map[filename] = tag
+    save_priority(image_folder, priority_map)
+    return priority_map
+
+
+def priority_mtime(image_folder):
+    """優先表示タグファイルの更新時刻だけを返す（存在しなければNone）"""
+    path = _priority_path(image_folder)
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None

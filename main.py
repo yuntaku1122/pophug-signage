@@ -14,7 +14,7 @@ import subprocess
 import threading
 from datetime import datetime
 from config import *
-from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime
+from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime, load_priority
 from version import __version__
 import wifi_setup
 from manual import MANUAL_PAGES
@@ -86,9 +86,10 @@ class PopSignage:
         self.font_medium = get_japanese_font(36)
         self.font_small = get_japanese_font(24)
 
-        self.pop_images = []          # 表示用にスケール済みSurfaceのリスト
+        self.pop_images = []          # 表示用にスケール済みSurfaceのリスト（優先表示の割り込み込みの表示順）
         self._image_cache = {}        # ファイル名 -> スケール済みSurface（変更が無ければ再利用）
-        self._image_mtimes = {}       # ファイル名 -> mtime（再スキャン判定用）
+        self._image_mtimes = {}       # ファイル名 -> mtime（デコードキャッシュの再利用判定用）
+        self._image_state_key = None  # (mtimes, 優先タグ, 割り込み間隔) の組。変化検知用
         self.current_pop_index = 0
         self.next_pop_index = 0
         self.pop_start_time = time.time()
@@ -182,10 +183,37 @@ class PopSignage:
         with self._lock:
             self._image_cache = {}
             self._image_mtimes = {}
+            self._image_state_key = None
         self.load_pop_images(initial=True)
 
+    @staticmethod
+    def _build_ordered_files(files, priority_map, interval):
+        """通常画像と優先表示画像を組み合わせた表示順序のファイル名リストを作る。
+        通常画像をinterval枚表示するごとに、優先表示1→優先表示2の順でまとめて割り込ませる。
+        優先表示に設定された画像は、通常のローテーションからは除外される。"""
+        normal = [f for f in files if priority_map.get(f) not in ("priority1", "priority2")]
+        priority1 = [f for f in files if priority_map.get(f) == "priority1"]
+        priority2 = [f for f in files if priority_map.get(f) == "priority2"]
+        priority = priority1 + priority2
+
+        if not priority or interval <= 0:
+            return normal
+        if not normal:
+            return priority
+
+        ordered = []
+        for i, f in enumerate(normal):
+            ordered.append(f)
+            if (i + 1) % interval == 0:
+                ordered.extend(priority)
+        if len(normal) % interval != 0:
+            # 通常画像の枚数がintervalで割り切れない場合、末尾にも一度差し込んでおく
+            # （優先表示が一度も出ないまま1周してしまうのを防ぐため）
+            ordered.extend(priority)
+        return ordered
+
     def load_pop_images(self, initial=False):
-        """images/ フォルダを読み込み、新しい画像があれば反映する。
+        """images/ フォルダを読み込み、新しい画像や優先表示設定の変更があれば反映する。
         アップロードサーバーから随時追加される画像を検知するため定期的に呼ばれる。"""
         supported = ('.jpg', '.jpeg', '.png')
         if not os.path.exists(IMAGE_FOLDER):
@@ -196,15 +224,31 @@ class PopSignage:
         files = [f for f in files if f not in hidden]
         mtimes = {f: os.path.getmtime(os.path.join(IMAGE_FOLDER, f)) for f in files}
 
-        if mtimes == self._image_mtimes:
+        priority_map = load_priority(IMAGE_FOLDER)
+        settings = load_settings(IMAGE_FOLDER, {"priority_interval": PRIORITY_INTERVAL})
+        try:
+            interval = int(settings.get("priority_interval", PRIORITY_INTERVAL))
+        except (TypeError, ValueError):
+            interval = PRIORITY_INTERVAL
+
+        # 変化検知: ファイルの追加/削除/更新だけでなく、優先表示タグや割り込み間隔の
+        # 変更でも表示順序の再構築が必要なため、それらもキーに含める
+        state_key = (
+            tuple(sorted(mtimes.items())),
+            tuple(sorted((k, v) for k, v in priority_map.items() if k in mtimes)),
+            interval,
+        )
+        if state_key == self._image_state_key:
             return  # 変化なし
+
+        ordered_files = self._build_ordered_files(files, priority_map, interval)
 
         w = self.canvas.get_width()
         h = self.canvas.get_height()
         new_cache = {}
         for f in files:
             if f in self._image_cache and self._image_mtimes.get(f) == mtimes[f]:
-                # ファイル自体は変わっていない（表示/非表示の切替だけ）ので再デコードしない
+                # ファイル自体は変わっていない（表示/非表示・優先表示の切替だけ）ので再デコードしない
                 new_cache[f] = self._image_cache[f]
                 continue
             path = os.path.join(IMAGE_FOLDER, f)
@@ -215,18 +259,21 @@ class PopSignage:
             except Exception as e:
                 log(f"画像読み込みエラー: {f} - {e}")
 
-        new_images = [new_cache[f] for f in files if f in new_cache]
+        new_images = [new_cache[f] for f in ordered_files if f in new_cache]
 
         with self._lock:
             self.pop_images = new_images
             self._image_cache = new_cache
             self._image_mtimes = mtimes
+            self._image_state_key = state_key
             if self.current_pop_index >= len(self.pop_images):
                 self.current_pop_index = 0
             self.next_pop_index = self.current_pop_index
 
         if not initial:
-            log(f"画像フォルダを再スキャン: {len(new_images)}枚 検出")
+            priority_count = len([f for f in files if f in priority_map])
+            log(f"画像フォルダを再スキャン: {len(new_images)}枚表示（うち優先表示 {priority_count}枚、"
+                f"{interval}枚ごとに割り込み）")
 
     @staticmethod
     def _fit_image(img, w, h):
