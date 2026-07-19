@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 
 def main():
@@ -37,17 +38,25 @@ def main():
         shutil.chown("/usr/local/bin/pophug-netctl", user="root", group="root")
         print("pophug-netctl updated")
 
-    # --no-block が重要: このスクリプト自身も元をたどれば
-    # pophug-signage.service から呼ばれた子プロセスなので、同じプロセスグループに
-    # 属している。素の"systemctl restart"（結果を待つ）だと、再起動処理が
-    # このスクリプト自身も巻き込んで強制終了させてしまい、「再起動コマンドが失敗した」
-    # と誤判定されて更新全体が不要にロールバックされる不具合があった。
-    # --no-block で「再起動の予約だけしてすぐ戻る」ようにすることで、
-    # 巻き込まれる前に正常終了できるようにする。
-    r = subprocess.run(["systemctl", "restart", "--no-block", "pophug-signage.service"])
+    # このスクリプト自身も元をたどれば pophug-signage.service から呼ばれた
+    # 子プロセスなので、同じプロセスグループに属している。
+    # 素の"systemctl restart"（結果を待つ）はもちろん、"--no-block"（予約だけしてすぐ戻る）
+    # でも、予約後ほぼ即座に実際の再起動処理が始まってしまうため、このスクリプト自身が
+    # 正常終了して制御を戻すタイミングと僅かに競合し、稀に巻き込まれて強制終了する
+    # 不具合が実際に発生した。
+    # そこで、再起動処理そのものを「2秒後に発火する、今の処理系統とは完全に独立した
+    # 一時的なタイマーユニット」として systemd-run で予約する。これにより、
+    # 今の処理系統が全て正常に完了し、Web側に結果を返し終えるまでの
+    # 十分な猶予（2秒）を確保してから実際の再起動が始まるようにする。
+    unit_name = f"pophug-restart-{int(time.time())}"
+    r = subprocess.run([
+        "systemd-run", "--collect", "--on-active=2",
+        f"--unit={unit_name}",
+        "systemctl", "restart", "pophug-signage.service",
+    ])
     if r.returncode != 0:
-        sys.exit("failed to queue service restart")
-    print("service restart queued")
+        sys.exit("failed to schedule service restart")
+    print(f"service restart scheduled via {unit_name} (in 2s)")
 
 
 if __name__ == "__main__":
