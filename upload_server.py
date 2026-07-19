@@ -127,6 +127,9 @@ UPLOAD_PAGE = """
   .switch input:checked + .slider:before { transform:translateX(20px); }
   .switch-label { font-size:13px; color:#555; }
   .switch-label.is-updating { color:#bbb; }
+  .delete-btn { width:100%; padding:8px; margin-top:4px; background:#fff; color:#c0392b;
+                border:1px solid #e0a5a5; border-radius:6px; font-size:12px; }
+  .delete-btn:disabled { color:#ccc; border-color:#eee; }
   .setting-row { margin-top:16px; }
   .setting-row label { font-size:14px; color:#333; display:flex; justify-content:space-between; }
   .setting-row input[type=range] { width:100%; margin:10px 0 4px; accent-color:#228b22; }
@@ -231,6 +234,46 @@ UPLOAD_PAGE = """
           cb.checked = !wasChecked;
           label.textContent = '更新に失敗しました';
           label.classList.remove('is-updating');
+        });
+    });
+  });
+
+  document.querySelectorAll('.delete-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var filename = this.dataset.filename;
+      var confirmed = window.confirm(
+        'この写真を削除しますか？\\n' +
+        '「' + filename + '」\\n\\n' +
+        'この操作は取り消せません。'
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      var item = document.getElementById('item-' + filename);
+      btn.disabled = true;
+      btn.textContent = '削除中...';
+
+      fetch('/delete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'filename=' + encodeURIComponent(filename)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.error) {
+            btn.disabled = false;
+            btn.textContent = '削除に失敗しました';
+            return;
+          }
+          item.remove();
+        })
+        .catch(function () {
+          btn.disabled = false;
+          btn.textContent = '削除に失敗しました';
         });
     });
   });
@@ -516,6 +559,7 @@ def render_gallery_item(filename, is_hidden):
         </label>
         <span class="switch-label">{label_text}</span>
       </div>
+      <button type="button" class="delete-btn" data-filename="{filename}">削除</button>
     </div>
     """
 
@@ -756,6 +800,42 @@ def create_app(image_folder):
 
         if request.headers.get("Accept") == "application/json":
             return {"filename": filename, "hidden": is_hidden}, 200
+
+        return redirect("/")
+
+    @app.route("/delete", methods=["POST"])
+    def delete():
+        filename = request.form.get("filename", "")
+
+        # パストラバーサル対策: ディレクトリ部分を取り除いた上で、
+        # 拡張子を含めて元の文字列と完全一致することを確認する
+        safe_name = os.path.basename(filename)
+        if not filename or safe_name != filename:
+            return {"error": "invalid filename"}, 400
+
+        ext = os.path.splitext(safe_name)[1].lower()
+        if ext not in (".jpg", ".jpeg", ".png"):
+            return {"error": "invalid filename"}, 400
+
+        path = os.path.join(image_folder, safe_name)
+        # image_folder配下に実際に収まっているかも念のため確認する
+        if os.path.commonpath([os.path.abspath(path), os.path.abspath(image_folder)]) != os.path.abspath(image_folder):
+            return {"error": "invalid filename"}, 400
+
+        if not os.path.isfile(path):
+            return {"error": "file not found"}, 404
+
+        os.remove(path)
+        # 非表示リストに載っていれば、そちらからも削除しておく
+        hidden_set = signage_state.load_hidden(image_folder)
+        if safe_name in hidden_set:
+            hidden_set.discard(safe_name)
+            signage_state.save_hidden(image_folder, hidden_set)
+
+        print(f"[delete] 画像を削除しました: {safe_name}")
+
+        if request.headers.get("Accept") == "application/json":
+            return {"filename": safe_name, "deleted": True}, 200
 
         return redirect("/")
 
