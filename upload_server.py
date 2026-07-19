@@ -430,6 +430,9 @@ UPLOAD_PAGE = """
             status.textContent = 'アップデートに失敗しました: ' + data.error;
             applyBtn.disabled = false;
             checkBtn.disabled = false;
+          } else if (data.state === 'success') {
+            status.textContent = 'v' + (data.version || '') + ' への更新が完了しました。'
+              + 'このページを再読み込みしてバージョンを確認してください。';
           } else {
             setTimeout(function () { pollUpdateStatus(attempt + 1); }, 2000);
           }
@@ -825,10 +828,6 @@ def create_app(image_folder):
 
         return redirect("/")
 
-    # アップデートの適用状況をスマホ側からポーリングで確認できるよう保持しておく
-    # （成功時はサービスごと再起動されるため、この変数自体が無くなる＝それも成功の合図になる）
-    update_status = {"state": "idle", "error": None}
-
     @app.route("/update/check")
     def update_check_route():
         result = update_check.check_latest(DEFAULT_GITHUB_REPO)
@@ -842,16 +841,12 @@ def create_app(image_folder):
             return {"error": "invalid parameters"}, 400
 
         print(f"[update] v{target_version} への更新要求を受け付けました")
-        update_status.update({"state": "applying", "error": None})
 
         def do_update():
-            ok, msg = update_check.apply_update(tarball_url, target_version)
-            if ok:
-                print(f"[update] {msg}")
-                update_status.update({"state": "success", "error": None})
-            else:
-                print(f"[update] 失敗: {msg}")
-                update_status.update({"state": "failed", "error": msg})
+            # 進行状況の記録はapply_update内部でファイルに逐一書き込まれる
+            # （このプロセス自体が再起動で終了する可能性があるため、
+            #  メモリ上の変数ではなくファイルを正とする設計にしている）
+            update_check.apply_update(tarball_url, target_version)
 
         threading.Thread(target=do_update, daemon=True).start()
 
@@ -861,7 +856,7 @@ def create_app(image_folder):
 
     @app.route("/update/status")
     def update_status_route():
-        return update_status
+        return update_check.read_status()
 
     @app.route("/wifi", methods=["GET"])
     def wifi_setup_page():

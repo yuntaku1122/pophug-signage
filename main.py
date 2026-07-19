@@ -522,6 +522,16 @@ class PopSignage:
         url_y = label_y + label.get_height() + 10
         self.canvas.blit(url_s, (w // 2 - url_s.get_width() // 2, url_y))
 
+        self._draw_version_watermark()
+
+    def _draw_version_watermark(self):
+        """画面右下に小さくバージョン番号を表示する（QR/取扱説明/Wi-Fiセットアップ画面用。
+        Webページを開かなくても、画面を見ただけで今のバージョンが分かるようにするため）"""
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
+        surf = get_japanese_font(14).render(f"v{__version__}", True, (140, 140, 140))
+        self.canvas.blit(surf, (w - surf.get_width() - 12, h - surf.get_height() - 10))
+
     # ---------------- 取扱説明モード ----------------
 
     def toggle_manual(self):
@@ -603,6 +613,7 @@ class PopSignage:
             y += s.get_height() + 8
 
         self.canvas.blit(footer_surf, (w // 2 - footer_surf.get_width() // 2, h - footer_surf.get_height() - 20))
+        self._draw_version_watermark()
 
     # ---------------- Wi-Fiセットアップモード ----------------
 
@@ -732,6 +743,8 @@ class PopSignage:
         for surf in self.wifi_setup_text_surfaces:
             self.canvas.blit(surf, (w // 2 - surf.get_width() // 2, y))
             y += surf.get_height() + 8
+
+        self._draw_version_watermark()
 
     # ---------------- 描画 ----------------
 
