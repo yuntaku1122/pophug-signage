@@ -33,6 +33,32 @@ python3 main.py
 `images/`フォルダにJPEG/PNGを置くと自動でスライドショーに反映される。
 起動すると`http://<このマシンのIP>:8080`でアップロードページが開く。
 
+## 複数台セットアップ時のホスト名の一意化
+
+SDカードは毎回同じイメージ（ホスト名`pophug`）を書き込むだけでよい。初回起動時に
+自動的にMACアドレス下4桁を使って`pophug-XXXX`のような一意なホスト名に変更されるため、
+複数台を同じネットワークに繋いでも`.local`名が衝突しない。
+
+**初回セットアップ直後のSSH接続について**: ホスト名の自動変更は起動後すぐに行われるため、
+起動から数十秒以内に`ssh pophug@pophug.local`で接続できなかった場合、既に
+`pophug-XXXX.local`に変わっている可能性がある。ルーターの接続機器一覧などで
+実際のIPアドレス・ホスト名を確認し、`ssh pophug@<新しいホスト名>.local`
+（または直接IPアドレス指定）で接続すること。
+
+### インストール（Pi側で1回だけ、SDカードごとに必要）
+
+```bash
+sudo cp pophug-hostname-setup /usr/local/bin/
+sudo chmod 755 /usr/local/bin/pophug-hostname-setup
+sudo cp pophug-hostname-setup.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable pophug-hostname-setup.service
+sudo systemctl start pophug-hostname-setup.service   # すぐに反映したい場合
+```
+
+複数台を量産する場合は、この手順まで済ませた状態のSDカードイメージを丸ごと複製して
+使い回すと、毎回の手動セットアップ手順を減らせる。
+
 ## QRコードボタン（4段階の長押しに対応）
 
 1つのボタンで4つの操作ができる。**判定は「離した瞬間の合計長押し時間」**で行われ、
@@ -221,6 +247,7 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
+| 4.10.0 | 複数台セットアップ時にホスト名が重複しないよう、初回起動時にMACアドレスから自動でホスト名を一意化する仕組みを追加 |
 | 4.9.0 | 写真ごとに「優先表示1」「優先表示2」を設定できる機能を追加。通常の写真を指定枚数表示するごとに、優先表示をまとめて割り込み表示できる（店のロゴ・メニュー一覧向け） |
 | 4.8.1 | アップデート機能の仕上げ処理をさらに堅牢化。systemd-runで再起動を完全に独立したタイマーとして予約する方式に変更し、自分自身が巻き込まれて強制終了する不具合を解消 |
 | 4.8.0 | アップロードページに画像ごとの削除機能を追加（確認ダイアログ経由） |

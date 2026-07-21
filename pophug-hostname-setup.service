@@ -1,0 +1,12 @@
+[Unit]
+Description=pophug: 起動時にMACアドレスを元にホスト名を一意化する（未変更の場合のみ）
+After=network.target
+Before=pophug-signage.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pophug-hostname-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

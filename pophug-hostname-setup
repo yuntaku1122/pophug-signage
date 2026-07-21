@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+# ============================================
+# pophug-hostname-setup
+#
+# 初回起動時、ホスト名がまだ工場出荷時のデフォルト("pophug")のままであれば、
+# wlan0のMACアドレス下4桁を使って機体ごとに一意なホスト名("pophug-XXXX")に
+# 自動的に変更する。SDカードは毎回同じイメージを書き込むだけでよく、
+# 複数台を並べても mDNS (xxx.local) のホスト名が衝突しないようにするための仕組み。
+#
+# 既にホスト名が変更済み（2回目以降の起動）の場合は何もしない（冪等）。
+#
+# インストール:
+#   sudo cp pophug-hostname-setup /usr/local/bin/
+#   sudo chmod 755 /usr/local/bin/pophug-hostname-setup
+#   sudo cp pophug-hostname-setup.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable pophug-hostname-setup.service
+# ============================================
+
+import subprocess
+import sys
+
+DEFAULT_HOSTNAME = "pophug"
+
+
+def get_current_hostname():
+    r = subprocess.run(["hostname"], capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def get_wlan_mac(iface="wlan0"):
+    try:
+        with open(f"/sys/class/net/{iface}/address", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def update_etc_hosts(new_hostname):
+    """/etc/hosts の 127.0.1.1 行を新しいホスト名に更新する。
+    これが無いままだと、一部のコマンド（sudoなど）が自分自身のホスト名を
+    名前解決できずに警告を出すことがあるため。"""
+    try:
+        with open("/etc/hosts", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as e:
+        print(f"/etc/hosts の読み込みに失敗しました（無視して続行）: {e}")
+        return
+
+    new_lines = []
+    replaced = False
+    for line in lines:
+        if line.startswith("127.0.1.1"):
+            new_lines.append(f"127.0.1.1\t{new_hostname}\n")
+            replaced = True
+        else:
+            new_lines.append(line)
+    if not replaced:
+        new_lines.append(f"127.0.1.1\t{new_hostname}\n")
+
+    try:
+        with open("/etc/hosts", "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    except OSError as e:
+        print(f"/etc/hosts の書き込みに失敗しました（無視して続行）: {e}")
+
+
+def main():
+    current = get_current_hostname()
+    if current != DEFAULT_HOSTNAME:
+        print(f"ホスト名は既に変更済みです（{current}）。何もしません。")
+        return
+
+    mac = get_wlan_mac()
+    if not mac:
+        print("wlan0のMACアドレスが取得できなかったため、ホスト名は変更しません"
+              "（次回起動時に再試行されます）。")
+        sys.exit(1)
+
+    suffix = mac.replace(":", "").upper()[-4:]
+    new_hostname = f"{DEFAULT_HOSTNAME}-{suffix}"
+
+    r = subprocess.run(["hostnamectl", "set-hostname", new_hostname])
+    if r.returncode != 0:
+        sys.exit("hostnamectl でのホスト名変更に失敗しました")
+
+    update_etc_hosts(new_hostname)
+    print(f"ホスト名を {new_hostname} に変更しました（MAC: {mac}）")
+
+
+if __name__ == "__main__":
+    main()
