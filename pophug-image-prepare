@@ -3,9 +3,13 @@
 # pophug-image-prepare
 #
 # 量産用の「マスターイメージ」を作る直前に、お手本となる1台のPi上で
-# 一度だけ実行するスクリプト。機体固有の情報（ホスト名・SSH鍵・machine-id・
-# 保存済みWi-Fi・写真データなど）を全て消去し、どのPiに書き込んでも
-# 安全に複製できる状態にする。
+# 一度だけ実行するスクリプト。
+#
+# ここでは「起動前に済ませておかないと、複製先が自分では気づけない」
+# 項目（ホスト名・SSH鍵・machine-id）だけをリセットする。
+# Wi-Fi接続情報・images/フォルダの中身・過去のアップデートのバックアップは、
+# ホスト名が初期値のままだと自動的に消去される仕組みが pophug-hostname-setup
+# 側に既にあるため、ここで重ねて消す必要はない（複製先が初回起動時に自分で行う）。
 #
 # 実行後は速やかに電源を切り、SDカードを取り出してイメージ化すること。
 # このPi自体を、実行後もそのまま使い続けることは想定していない
@@ -20,6 +24,8 @@ set -e
 echo "=== pophug 量産マスターイメージ準備スクリプト ==="
 echo "このPi自体は、実行後すぐに電源を切ってイメージ化する前提です。"
 echo "（実行後にこのPiを普段使いに戻すことは想定していません）"
+echo "Wi-Fi接続情報・写真・アップデートのバックアップは、次回起動時に"
+echo "pophug-hostname-setupが自動で消去するため、ここでは扱いません。"
 echo ""
 read -p "続行しますか？ (yes と入力): " CONFIRM
 if [ "$CONFIRM" != "yes" ]; then
@@ -27,17 +33,7 @@ if [ "$CONFIRM" != "yes" ]; then
     exit 1
 fi
 
-APP_DIR="/home/pophug/pophug-signage"
-
 echo ""
-echo "--- images/ フォルダの中身（写真・非表示/優先表示/更新状態など）を消去 ---"
-if [ -d "$APP_DIR/images" ]; then
-    sudo find "$APP_DIR/images" -mindepth 1 -delete
-fi
-
-echo "--- 過去のアップデートで残ったバックアップフォルダを削除 ---"
-sudo rm -rf "$APP_DIR"/.backup-* 2>/dev/null || true
-
 echo "--- ホスト名を工場出荷時の状態(pophug)に戻す ---"
 sudo hostnamectl set-hostname pophug
 sudo sed -i "s/^127\.0\.1\.1.*/127.0.1.1\tpophug/" /etc/hosts
@@ -49,12 +45,6 @@ echo "--- machine-id を消去（次回起動時にsystemdが自動再生成） 
 sudo truncate -s 0 /etc/machine-id
 sudo rm -f /var/lib/dbus/machine-id
 sudo ln -sf /etc/machine-id /var/lib/dbus/machine-id
-
-echo "--- 保存済みのWi-Fi接続情報を削除 ---"
-for con in $(nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1}'); do
-    echo "  削除: $con"
-    sudo nmcli connection delete "$con" || true
-done
 
 echo "--- コマンド履歴・ログを消去 ---"
 cat /dev/null > "$HOME/.bash_history" 2>/dev/null || true
@@ -74,3 +64,5 @@ echo "  sudo dd if=/dev/rdiskN of=~/pophug-master.img bs=4m status=progress"
 echo ""
 echo "以降は Raspberry Pi Imager で pophug-master.img を選んで書き込むだけで、"
 echo "新しい1台をセットアップできます（git clone・pip install等は不要）。"
+echo "初回起動時に、Wi-Fi接続情報・写真・アップデートのバックアップも"
+echo "自動的に消去された上で、機体ごとに一意なホスト名が設定されます。"

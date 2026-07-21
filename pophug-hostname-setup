@@ -4,12 +4,17 @@
 #
 # 起動時に、複製されたSDカード特有の「機体固有情報の重複」を解消するスクリプト。
 #
-# ① ホスト名がまだ工場出荷時のデフォルト("pophug")のままであれば、wlan0のMAC
-#    アドレス下4桁を使って機体ごとに一意なホスト名("pophug-XXXX")に変更する。
-# ② SSHホスト鍵が存在しなければ（量産マスターイメージ作成時に削除されている場合）、
+# ① SSHホスト鍵が存在しなければ（量産マスターイメージ作成時に削除されている場合）、
 #    その場で新規に生成し直す。全台が同じSSH鍵を共有してしまうことを防ぐため。
+# ② ホスト名がまだ工場出荷時のデフォルト("pophug")のままであれば、
+#    ＝「これは複製直後の初回起動である」とみなし、以下をまとめて行う。
+#      - 保存済みのWi-Fi接続情報を削除（複製元の機体のWi-Fi設定を引き継がない）
+#      - images/フォルダの中身（写真・表示状態ファイル）を削除（複製元の写真を引き継がない）
+#      - 過去のアップデートで残ったバックアップフォルダを削除
+#      - wlan0のMACアドレス下4桁を使って機体ごとに一意なホスト名に変更する
 #
-# どちらも「既に済んでいれば何もしない」ため、毎回の起動時に実行しても安全（冪等）。
+# 既に初期化済み（ホスト名が変更済み）であれば②は何もしないため、
+# 毎回の起動時に実行しても安全（冪等）。
 #
 # インストール:
 #   sudo cp pophug-hostname-setup /usr/local/bin/
@@ -20,10 +25,14 @@
 # ============================================
 
 import glob
+import os
+import shutil
 import subprocess
 import sys
 
 DEFAULT_HOSTNAME = "pophug"
+APP_DIR = "/home/pophug/pophug-signage"
+IMAGES_DIR = os.path.join(APP_DIR, "images")
 
 
 def get_current_hostname():
@@ -54,6 +63,52 @@ def regenerate_ssh_host_keys_if_missing():
 
     subprocess.run(["systemctl", "restart", "ssh"])
     print("SSHホスト鍵を新規生成しました")
+
+
+def clear_saved_wifi_connections():
+    """保存済みのWi-Fi接続プロファイルを全て削除する
+    （複製元の機体が繋いでいたWi-Fi情報を引き継がないようにするため）。"""
+    try:
+        r = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:
+        print(f"Wi-Fi接続一覧の取得に失敗しました（無視して続行）: {e}")
+        return
+
+    for line in r.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2 and parts[1] == "802-11-wireless":
+            name = parts[0]
+            print(f"保存済みWi-Fi接続を削除します: {name}")
+            subprocess.run(["nmcli", "connection", "delete", name], capture_output=True)
+
+
+def clear_images_folder():
+    """images/フォルダの中身（写真・表示状態ファイルなど）を全て消去する
+    （複製元の機体の写真やデータを引き継がないようにするため）。フォルダ自体は残す。"""
+    if not os.path.isdir(IMAGES_DIR):
+        return
+    for name in os.listdir(IMAGES_DIR):
+        path = os.path.join(IMAGES_DIR, name)
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        except OSError as e:
+            print(f"{path} の削除に失敗しました（無視して続行）: {e}")
+    print("images/フォルダの中身を消去しました")
+
+
+def clear_update_backups():
+    """過去のアップデートで残ったバックアップフォルダ(.backup-*)を削除する"""
+    for path in glob.glob(os.path.join(APP_DIR, ".backup-*")):
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            pass
 
 
 def update_etc_hosts(new_hostname):
@@ -93,6 +148,11 @@ def main():
         print(f"ホスト名は既に変更済みです（{current}）。何もしません。")
         return
 
+    print("初回起動を検知しました（ホスト名が初期値のまま）。機体固有の情報を初期化します...")
+    clear_saved_wifi_connections()
+    clear_images_folder()
+    clear_update_backups()
+
     mac = get_wlan_mac()
     if not mac:
         print("wlan0のMACアドレスが取得できなかったため、ホスト名は変更しません"
@@ -108,6 +168,7 @@ def main():
 
     update_etc_hosts(new_hostname)
     print(f"ホスト名を {new_hostname} に変更しました（MAC: {mac}）")
+    print("初期化が完了しました。")
 
 
 if __name__ == "__main__":
