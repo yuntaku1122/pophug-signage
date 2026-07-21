@@ -11,6 +11,7 @@ import random
 import time
 import io
 import subprocess
+import socket
 import threading
 from datetime import datetime
 from config import *
@@ -576,11 +577,12 @@ class PopSignage:
         self._draw_version_watermark()
 
     def _draw_version_watermark(self):
-        """画面右下に小さくバージョン番号を表示する（QR/取扱説明/Wi-Fiセットアップ画面用。
-        Webページを開かなくても、画面を見ただけで今のバージョンが分かるようにするため）"""
+        """画面右下に小さくバージョン番号とホスト名を表示する（QR/取扱説明/Wi-Fiセットアップ画面用。
+        Webページを開かなくても、画面を見ただけで今のバージョン・機体が分かるようにするため）"""
         w = self.canvas.get_width()
         h = self.canvas.get_height()
-        surf = get_japanese_font(14).render(f"v{__version__}", True, (140, 140, 140))
+        hostname = socket.gethostname()
+        surf = get_japanese_font(14).render(f"{hostname} / v{__version__}", True, (140, 140, 140))
         self.canvas.blit(surf, (w - surf.get_width() - 12, h - surf.get_height() - 10))
 
     # ---------------- 取扱説明モード ----------------

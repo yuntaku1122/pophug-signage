@@ -20,6 +20,7 @@
 # ============================================
 
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -457,7 +458,7 @@ UPLOAD_PAGE = """
 
   <div class="box" style="margin-top:16px;">
     <h1>アップデート</h1>
-    <p class="hint" style="margin:0 0 12px;">現在のバージョン: v__CURRENT_VERSION__</p>
+    <p class="hint" style="margin:0 0 12px;">現在のバージョン: v__CURRENT_VERSION__（ホスト名: __HOSTNAME__）</p>
     <button type="button" id="check-update-btn" class="btn-secondary">最新バージョンを確認</button>
     <div id="update-info" style="display:none;">
       <p class="update-changelog" id="update-changelog"></p>
@@ -875,6 +876,7 @@ def create_app(image_folder):
                 .replace("__PRIORITY_INTERVAL__", str(priority_interval))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__CURRENT_VERSION__", __version__)
+                .replace("__HOSTNAME__", socket.gethostname())
                 .replace("__NETWORK_MODE_LABEL__", network_mode_label)
                 .replace("__GALLERY__", gallery_html)
                 .replace("__VERSION__", __version__))
