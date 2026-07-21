@@ -2,12 +2,14 @@
 # ============================================
 # pophug-hostname-setup
 #
-# 初回起動時、ホスト名がまだ工場出荷時のデフォルト("pophug")のままであれば、
-# wlan0のMACアドレス下4桁を使って機体ごとに一意なホスト名("pophug-XXXX")に
-# 自動的に変更する。SDカードは毎回同じイメージを書き込むだけでよく、
-# 複数台を並べても mDNS (xxx.local) のホスト名が衝突しないようにするための仕組み。
+# 起動時に、複製されたSDカード特有の「機体固有情報の重複」を解消するスクリプト。
 #
-# 既にホスト名が変更済み（2回目以降の起動）の場合は何もしない（冪等）。
+# ① ホスト名がまだ工場出荷時のデフォルト("pophug")のままであれば、wlan0のMAC
+#    アドレス下4桁を使って機体ごとに一意なホスト名("pophug-XXXX")に変更する。
+# ② SSHホスト鍵が存在しなければ（量産マスターイメージ作成時に削除されている場合）、
+#    その場で新規に生成し直す。全台が同じSSH鍵を共有してしまうことを防ぐため。
+#
+# どちらも「既に済んでいれば何もしない」ため、毎回の起動時に実行しても安全（冪等）。
 #
 # インストール:
 #   sudo cp pophug-hostname-setup /usr/local/bin/
@@ -17,6 +19,7 @@
 #   sudo systemctl enable pophug-hostname-setup.service
 # ============================================
 
+import glob
 import subprocess
 import sys
 
@@ -34,6 +37,23 @@ def get_wlan_mac(iface="wlan0"):
             return f.read().strip()
     except OSError:
         return None
+
+
+def regenerate_ssh_host_keys_if_missing():
+    """量産マスターイメージ作成時にSSHホスト鍵を削除してある場合、
+    ここで新規に生成し直す。既に鍵が存在する（通常の起動）場合は何もしない。"""
+    existing = glob.glob("/etc/ssh/ssh_host_*_key")
+    if existing:
+        return  # 既に鍵がある(複製直後の初回起動ではない)ので何もしない
+
+    print("SSHホスト鍵が見つからないため、新規に生成します...")
+    r = subprocess.run(["ssh-keygen", "-A"])
+    if r.returncode != 0:
+        print("SSHホスト鍵の生成に失敗しました（無視して続行）")
+        return
+
+    subprocess.run(["systemctl", "restart", "ssh"])
+    print("SSHホスト鍵を新規生成しました")
 
 
 def update_etc_hosts(new_hostname):
@@ -66,6 +86,8 @@ def update_etc_hosts(new_hostname):
 
 
 def main():
+    regenerate_ssh_host_keys_if_missing()
+
     current = get_current_hostname()
     if current != DEFAULT_HOSTNAME:
         print(f"ホスト名は既に変更済みです（{current}）。何もしません。")

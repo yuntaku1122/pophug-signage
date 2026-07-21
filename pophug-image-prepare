@@ -1,0 +1,76 @@
+#!/bin/bash
+# ============================================
+# pophug-image-prepare
+#
+# 量産用の「マスターイメージ」を作る直前に、お手本となる1台のPi上で
+# 一度だけ実行するスクリプト。機体固有の情報（ホスト名・SSH鍵・machine-id・
+# 保存済みWi-Fi・写真データなど）を全て消去し、どのPiに書き込んでも
+# 安全に複製できる状態にする。
+#
+# 実行後は速やかに電源を切り、SDカードを取り出してイメージ化すること。
+# このPi自体を、実行後もそのまま使い続けることは想定していない
+# （次に起動した時点で、複製先の1台目として扱われてしまうため）。
+#
+# 使い方:
+#   bash pophug-image-prepare
+# ============================================
+
+set -e
+
+echo "=== pophug 量産マスターイメージ準備スクリプト ==="
+echo "このPi自体は、実行後すぐに電源を切ってイメージ化する前提です。"
+echo "（実行後にこのPiを普段使いに戻すことは想定していません）"
+echo ""
+read -p "続行しますか？ (yes と入力): " CONFIRM
+if [ "$CONFIRM" != "yes" ]; then
+    echo "中止しました"
+    exit 1
+fi
+
+APP_DIR="/home/pophug/pophug-signage"
+
+echo ""
+echo "--- images/ フォルダの中身（写真・非表示/優先表示/更新状態など）を消去 ---"
+if [ -d "$APP_DIR/images" ]; then
+    sudo find "$APP_DIR/images" -mindepth 1 -delete
+fi
+
+echo "--- 過去のアップデートで残ったバックアップフォルダを削除 ---"
+sudo rm -rf "$APP_DIR"/.backup-* 2>/dev/null || true
+
+echo "--- ホスト名を工場出荷時の状態(pophug)に戻す ---"
+sudo hostnamectl set-hostname pophug
+sudo sed -i "s/^127\.0\.1\.1.*/127.0.1.1\tpophug/" /etc/hosts
+
+echo "--- SSHホスト鍵を削除（次回起動時にpophug-hostname-setupが自動再生成） ---"
+sudo rm -f /etc/ssh/ssh_host_*
+
+echo "--- machine-id を消去（次回起動時にsystemdが自動再生成） ---"
+sudo truncate -s 0 /etc/machine-id
+sudo rm -f /var/lib/dbus/machine-id
+sudo ln -sf /etc/machine-id /var/lib/dbus/machine-id
+
+echo "--- 保存済みのWi-Fi接続情報を削除 ---"
+for con in $(nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1}'); do
+    echo "  削除: $con"
+    sudo nmcli connection delete "$con" || true
+done
+
+echo "--- コマンド履歴・ログを消去 ---"
+cat /dev/null > "$HOME/.bash_history" 2>/dev/null || true
+history -c 2>/dev/null || true
+sudo journalctl --rotate 2>/dev/null || true
+sudo journalctl --vacuum-time=1s 2>/dev/null || true
+
+echo ""
+echo "=== 完了しました ==="
+echo "このまま以下を実行してPiの電源を切り、SDカードを取り出してイメージ化してください。"
+echo ""
+echo "  sudo shutdown -h now"
+echo ""
+echo "Mac側でのイメージ化手順（Piの電源を切った後、SDカードを挿した状態で）:"
+echo "  diskutil list                                    # SDカードのディスク番号を確認"
+echo "  sudo dd if=/dev/rdiskN of=~/pophug-master.img bs=4m status=progress"
+echo ""
+echo "以降は Raspberry Pi Imager で pophug-master.img を選んで書き込むだけで、"
+echo "新しい1台をセットアップできます（git clone・pip install等は不要）。"
