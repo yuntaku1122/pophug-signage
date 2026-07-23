@@ -6,10 +6,16 @@
 # 個別にバージョン番号を書き込まない（変更漏れ・食い違いを防ぐため）。
 # ============================================
 
-__version__ = "4.14.0"
+__version__ = "4.14.1"
 
 # 変更履歴（新しいものが上）
 CHANGELOG = [
+    ("4.14.1", "pophug-update-apply自身が自分自身(/usr/local/bin/pophug-update-apply)を"
+               "更新しない不具合を修正。v4.14.0でpophug-signage.serviceの自動配信に対応した"
+               "つもりだったが、実行される側の/usr/local/bin/pophug-update-applyが古いままだと"
+               "新しい配置ロジック自体が実行されず、結果としてpophug-signage.serviceが"
+               "更新されないままになる「鶏と卵」の不具合があった。既にv4.14.0を適用済みの"
+               "機体は、1回だけ手動でpophug-update-applyを再配置する必要がある（README参照）"),
     ("4.14.0", "本体(main.py)のsystemdユニット定義pophug-signage.serviceをリポジトリの"
                "管理対象に追加し、pophug-netctl等と同様にOTAアップデートで自動配信・"
                "反映されるようにした。これにより、v4.12.0で追加したウォッチドッグ機能"

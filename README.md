@@ -315,9 +315,24 @@ RestartSec=5
   （手元の1台だけ試したい場合は、直接編集後に
   `sudo systemctl daemon-reload && sudo systemctl restart pophug-signage.service`）
 
-反映後、`systemctl status pophug-signage.service`で`Status`欄に`Watchdog:`表示があれば
-有効化できている。意図的にフリーズを再現して確認したい場合は、`main.py`のメインループ内に
-一時的に`time.sleep(60)`を仕込んで再起動されることを確認し、確認後は必ず元に戻すこと。
+**【重要】v4.14.0を適用済みの機体は、1回だけ手動対応が必要:** `pophug-update-apply`
+自体を更新するロジックがv4.14.0時点では欠けていたため（v4.14.1で修正）、
+`/usr/local/bin/pophug-update-apply`が古いままだと新しい配置ロジックが実行されず、
+`pophug-signage.service`が更新されないままになる。以下を1回だけ実行すること
+（v4.14.1以降を新規に導入する機体では不要）。
+
+```bash
+sudo cp /home/pophug/pophug-signage/pophug-update-apply /usr/local/bin/pophug-update-apply
+sudo chmod 755 /usr/local/bin/pophug-update-apply
+sudo chown root:root /usr/local/bin/pophug-update-apply
+sudo /usr/local/bin/pophug-update-apply /home/pophug/pophug-signage
+```
+
+反映後、`systemctl show pophug-signage.service -p Type -p WatchdogUSec -p NotifyAccess`で
+`Type=notify` / `WatchdogUSec=30s` / `NotifyAccess=main`と表示されることを確認する
+（`systemctl status`には専用の表示行は出ないので、こちらのコマンドで確認すること）。
+意図的にフリーズを再現して確認したい場合は、`main.py`のメインループ内に一時的に
+`time.sleep(60)`を仕込んで再起動されることを確認し、確認後は必ず元に戻すこと。
 
 ### ハードウェアウォッチドッグ（カーネルごとの完全フリーズにも対応）
 
@@ -377,6 +392,7 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
+| 4.14.1 | pophug-update-applyが自分自身を更新しない「鶏と卵」の不具合を修正。v4.14.0適用済み機体は1回だけ手動での再配置が必要（README参照） |
 | 4.14.0 | pophug-signage.service自体をリポジトリ管理下に置き、OTAアップデートで自動配信・反映されるようにした（ウォッチドッグ機能の有効化に手動でのsystemdユニット編集が不要になった） |
 | 4.13.0 | ハードウェアウォッチドッグ（カーネルごとの完全フリーズに対応、自動設定）を追加。Wi-Fiセットアップで非表示SSIDへ直接入力で確実に接続できるよう修正 |
 | 4.12.1 | pophug-netctlのSSID検証が厳しすぎて、iPhoneの個人ホットスポット名（アポストロフィ入り）等への接続が「invalid ssid」で失敗する不具合を修正 |

@@ -4,6 +4,9 @@
 #
 # アップデート処理のうち、root権限が必要な最後の仕上げだけを行う
 # 限定ヘルパースクリプト。
+#   0. staging_dir/pophug-update-apply があれば、自分自身(/usr/local/bin/pophug-update-apply)
+#      を置き換える（このスクリプト自体の将来の変更を、次回のアップデートから
+#      自動的に反映できるようにするため）
 #   1. staging_dir/pophug-netctl があれば /usr/local/bin/pophug-netctl を置き換える
 #   2. staging_dir/pophug-hostname-setup があれば /usr/local/bin/pophug-hostname-setup を置き換える
 #   3. staging_dir/pophug-hostname-setup.service があれば
@@ -28,6 +31,7 @@ import subprocess
 import sys
 import time
 
+UPDATE_APPLY_DEST = "/usr/local/bin/pophug-update-apply"
 NETCTL_DEST = "/usr/local/bin/pophug-netctl"
 HOSTNAME_SETUP_DEST = "/usr/local/bin/pophug-hostname-setup"
 HOSTNAME_SERVICE_DEST = "/etc/systemd/system/pophug-hostname-setup.service"
@@ -52,6 +56,15 @@ def main():
     staging_dir = sys.argv[1]
     if not os.path.isdir(staging_dir):
         sys.exit(f"staging dir not found: {staging_dir}")
+
+    # このスクリプト自身を最初に自己更新する。実行中のプロセスはメモリ上に読み込み
+    # 済みのファイル実体を使い続けるためこの場で上書きしても安全（Linuxのinodeの性質上、
+    # 実行中に自分自身のファイル内容を書き換えても今の実行には影響しない）。これにより、
+    # 「新しい配置ロジックを実行するには、まずそのロジック自体が配置されている必要がある」
+    # という鶏と卵の問題を解消し、以降のバージョンでこのスクリプト自体に変更が入っても
+    # 次回のアップデート適用時から自動的に反映されるようになる。
+    if _install_helper(staging_dir, "pophug-update-apply", UPDATE_APPLY_DEST):
+        print("pophug-update-apply (self) updated")
 
     if _install_helper(staging_dir, "pophug-netctl", NETCTL_DEST):
         print("pophug-netctl updated")
