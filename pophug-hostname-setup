@@ -34,6 +34,12 @@ DEFAULT_HOSTNAME = "pophug"
 APP_DIR = "/home/pophug/pophug-signage"
 IMAGES_DIR = os.path.join(APP_DIR, "images")
 
+# ハードウェアウォッチドッグ関連
+CONFIG_TXT_CANDIDATES = ["/boot/firmware/config.txt", "/boot/config.txt"]
+SYSTEM_CONF_PATH = "/etc/systemd/system.conf"
+WATCHDOG_DTPARAM_LINE = "dtparam=watchdog=on"
+RUNTIME_WATCHDOG_SEC = "15"
+
 
 def get_current_hostname():
     r = subprocess.run(["hostname"], capture_output=True, text=True)
@@ -63,6 +69,108 @@ def regenerate_ssh_host_keys_if_missing():
 
     subprocess.run(["systemctl", "restart", "ssh"])
     print("SSHホスト鍵を新規生成しました")
+
+
+def _find_config_txt():
+    for path in CONFIG_TXT_CANDIDATES:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _ensure_dtparam_watchdog(config_txt_path):
+    """config.txtに dtparam=watchdog=on が無ければ追記する（bcm2835_wdtカーネルドライバを
+    有効化し、/dev/watchdogを使えるようにするため）。既にあれば何もしない。
+    戻り値: 新たに追記したかどうか。"""
+    try:
+        with open(config_txt_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        print(f"{config_txt_path} の読み込みに失敗しました（無視して続行）: {e}")
+        return False
+
+    for line in content.splitlines():
+        if line.strip() == WATCHDOG_DTPARAM_LINE:
+            return False  # 既に設定済み
+
+    try:
+        with open(config_txt_path, "a", encoding="utf-8") as f:
+            if content and not content.endswith("\n"):
+                f.write("\n")
+            f.write(WATCHDOG_DTPARAM_LINE + "\n")
+    except OSError as e:
+        print(f"{config_txt_path} への書き込みに失敗しました（無視して続行）: {e}")
+        return False
+    print(f"{config_txt_path} に {WATCHDOG_DTPARAM_LINE} を追加しました")
+    return True
+
+
+def _ensure_runtime_watchdog_sec():
+    """/etc/systemd/system.conf の [Manager] セクションに RuntimeWatchdogSec を設定する。
+    systemd(PID1)自身がハードウェアウォッチドッグを定期的に「無事です」と叩き続け、
+    カーネルごと完全にフリーズしてsystemdすら応答しなくなった場合に、指定秒数後
+    ハードウェアが強制的に再起動をかけてくれるようになる。
+    既に何らかの値が設定されていれば（意図的な変更の可能性があるため）上書きしない。
+    戻り値: 新たに設定したかどうか。"""
+    try:
+        with open(SYSTEM_CONF_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as e:
+        print(f"{SYSTEM_CONF_PATH} の読み込みに失敗しました（無視して続行）: {e}")
+        return False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("RuntimeWatchdogSec=") and not stripped.startswith("#"):
+            return False  # 既に何らかの値が設定済み
+
+    new_lines = list(lines)
+    inserted = False
+    for i, line in enumerate(new_lines):
+        if line.strip() == "[Manager]":
+            new_lines.insert(i + 1, f"RuntimeWatchdogSec={RUNTIME_WATCHDOG_SEC}\n")
+            inserted = True
+            break
+    if not inserted:
+        # [Manager]セクション自体が見つからない場合（コメントのみのファイル等）は
+        # ファイル先頭に新設する
+        new_lines = [f"[Manager]\nRuntimeWatchdogSec={RUNTIME_WATCHDOG_SEC}\n\n"] + new_lines
+
+    try:
+        with open(SYSTEM_CONF_PATH, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    except OSError as e:
+        print(f"{SYSTEM_CONF_PATH} への書き込みに失敗しました（無視して続行）: {e}")
+        return False
+    print(f"{SYSTEM_CONF_PATH} に RuntimeWatchdogSec={RUNTIME_WATCHDOG_SEC} を設定しました")
+    return True
+
+
+def ensure_hardware_watchdog_enabled():
+    """カーネルごとの完全なフリーズ（アプリだけでなくOS全体が応答しなくなるケース）に
+    備え、ハードウェアウォッチドッグ（bcm2835_wdtドライバ + systemdのRuntimeWatchdogSec）
+    を有効化する。
+
+    量産マスターイメージの時点で既に設定済みなら、複製した各機体では何もしない
+    （＝通常運用中に毎回この処理が走るわけではない）。まだ設定されていない機体
+    （このコード自体を後から適用した既存機体など）でだけ設定を追加し、有効化には
+    再起動が必要なため、この処理の中で完結させるようその場で再起動する。
+    起動シーケンス上、この処理はpophug-signage.serviceより前に実行されるので、
+    サイネージ画面が表示される前に再起動しても利用者への影響は無い。"""
+    changed = False
+
+    config_txt = _find_config_txt()
+    if config_txt:
+        changed = _ensure_dtparam_watchdog(config_txt) or changed
+    else:
+        print("config.txtが見つからないため、dtparam=watchdog=onの設定をスキップしました")
+
+    changed = _ensure_runtime_watchdog_sec() or changed
+
+    if changed:
+        print("ハードウェアウォッチドッグの設定を追加しました。反映のため再起動します...")
+        subprocess.run(["/sbin/reboot"])
+        sys.exit(0)  # reboot呼び出し後、実際にシステムが落ちるまでの間もここで処理を止めておく
 
 
 def clear_saved_wifi_connections():
@@ -142,6 +250,7 @@ def update_etc_hosts(new_hostname):
 
 def main():
     regenerate_ssh_host_keys_if_missing()
+    ensure_hardware_watchdog_enabled()
 
     current = get_current_hostname()
     if current != DEFAULT_HOSTNAME:

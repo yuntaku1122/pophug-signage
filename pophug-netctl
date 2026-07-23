@@ -21,13 +21,10 @@
 #   sudo chown root:root /usr/local/bin/pophug-netctl
 # ============================================
 
-import re
 import subprocess
 import sys
 
 HOTSPOT_CON_NAME = "pophug-setup-ap"
-
-SSID_RE = re.compile(r"^[\w\-\. ]{1,32}$")
 
 
 def run(cmd, timeout=30):
@@ -42,7 +39,30 @@ def run(cmd, timeout=30):
 
 
 def valid_ssid(ssid):
-    return bool(SSID_RE.match(ssid))
+    """SSIDとして許容できるかを検証する。
+
+    以前は使える文字を [\\w\\-\\. ]（英数字・アンダースコア・ハイフン・ドット・
+    スペースのみ）に厳しく制限していたが、これだとiPhoneの個人ホットスポットの
+    デフォルト名（例: "Satoru's iPhone"）のようなアポストロフィを含む、ごく普通の
+    SSIDまで「invalid ssid」として弾いてしまう不具合があった（実機で発生）。
+
+    nmcliへは配列引数としてそのまま渡しており（shell=Trueではない）、シェル経由の
+    コマンドインジェクションのリスクはそもそも無い。ここで防ぐべきなのは以下だけ:
+      - 空文字（SSIDとして意味を成さない）
+      - Wi-Fi規格上のSSID長の上限（32バイト、UTF-8換算。絵文字や日本語のSSIDは
+        1文字が複数バイトになるため、文字数ではなくバイト数で判定する）
+      - 制御文字（NUL・改行など。ログや設定ファイルへの書き込みで問題を起こしうる）
+      - 先頭が "-" のもの（nmcli自身が値ではなくオプションフラグと誤解する可能性がある）
+    """
+    if not ssid:
+        return False
+    if ssid.startswith("-"):
+        return False
+    if len(ssid.encode("utf-8", errors="surrogatepass")) > 32:
+        return False
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in ssid):
+        return False
+    return True
 
 
 def valid_password(password):
@@ -128,7 +148,7 @@ def cmd_connect(args):
 
     _delete_connections_for_ssid(ssid)
 
-    connect_cmd = ["nmcli", "device", "wifi", "connect", ssid]
+    connect_cmd = ["nmcli", "device", "wifi", "connect", ssid, "hidden", "yes"]
     if password:
         connect_cmd += ["password", password]
     r = run(connect_cmd, timeout=45)

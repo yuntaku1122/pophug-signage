@@ -690,7 +690,7 @@ WIFI_SETUP_PAGE = """
 <body>
   <div class="box">
     <h1>Wi-Fi設定</h1>
-    <p class="hint">接続したいWi-Fiを選ぶか、下に直接入力してください。</p>
+    <p class="hint">接続したいWi-Fiを選ぶか、下に直接入力してください。一覧に出てこない非表示（ステルス）のWi-Fiも、SSIDとパスワードが分かっていれば直接入力で接続できます。</p>
     <ul class="net-list" id="net-list">
       __NETWORK_ITEMS__
     </ul>

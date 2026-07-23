@@ -16,6 +16,7 @@
 | `signage_state.py` | 表示/非表示・トランジション速度などの状態（`images/.hidden.json`, `images/.settings.json`）の読み書き |
 | `wifi_setup.py` | Wi-Fiセットアップモード関連（SSID自動生成、QRペイロード生成、netctl呼び出し） |
 | `update_check.py` | アップデート確認・適用（GitHub Releases連携、ファイル入れ替え、ロールバック） |
+| `sd_watchdog.py` | systemdのWatchdog機能向けの生存通知（フリーズ時の自動再起動用） |
 | `scripts/pophug-netctl` | root権限が必要なネットワーク操作だけを行う限定ヘルパー（要インストール、後述） |
 | `scripts/pophug-update-apply` | root権限が必要な更新の仕上げ（netctl入れ替え・サービス再起動）だけを行う限定ヘルパー（要インストール、後述） |
 | `version.py` | バージョン情報・変更履歴 |
@@ -273,6 +274,80 @@ sudo visudo -c
 `config.py`の`GITHUB_REPO`（`"ユーザー名/リポジトリ名"`の形式）が、実際に使うリポジトリと
 一致していることを確認しておくこと。
 
+## ウォッチドッグ機能（フリーズ時の自動復帰）
+
+キッチンカーでの運用中、pygameのメインループが何らかの原因（例外を出さずに応答しなくなる
+ような固まり方）でフリーズした場合に、systemdがそれを検知して自動的にサービスを再起動する
+仕組み。`sd_watchdog.py`が、起動完了時に`READY=1`、以降はメインループが1フレーム分正常に
+完了するたびに一定間隔で`WATCHDOG=1`をsystemdへ通知する。メインループが固まって通知が
+途絶えると、systemd側で設定した`WatchdogSec`の時間が経過した時点でsystemdがプロセスを
+強制終了し、`Restart=`の設定に従って自動的に再起動する。
+
+**この機能を有効にするには、`pophug-signage.service`（`/etc/systemd/system/`配下）の
+`[Service]`セクションに以下を追加する必要がある**（本リポジトリでは、このユニットファイル
+自体は購入者ごとに作成されている想定のため管理対象に含めていない）。
+
+```ini
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+Restart=on-failure
+RestartSec=3
+```
+
+- `WatchdogSec=30`: 30秒間`WATCHDOG=1`の通知が来なければフリーズとみなす。`sd_watchdog.py`側は
+  この値の半分（15秒）間隔で自動的に通知するため、手動で間隔を合わせ込む必要はない
+  （`WatchdogSec`を変更した場合、通知間隔も自動的に追従する）
+- `Restart=on-failure`: ウォッチドッグによるkillも含め、異常終了時に自動再起動する
+  （ボタン長押しでの正常シャットダウン時は先に`shutdown -h now`でOS自体を止めるため、
+  ここでのRestartとは競合しない）
+- 既存の`ExecStart=`・`User=`・`WorkingDirectory=`などの設定はそのまま残し、上記を追記する形でよい
+- 設定変更後は `sudo systemctl daemon-reload && sudo systemctl restart pophug-signage.service` で反映
+
+反映後、`systemctl status pophug-signage.service`で`Status`欄に`Watchdog:`表示があれば
+有効化できている。意図的にフリーズを再現して確認したい場合は、`main.py`のメインループ内に
+一時的に`time.sleep(60)`を仕込んで再起動されることを確認し、確認後は必ず元に戻すこと。
+
+### ハードウェアウォッチドッグ（カーネルごとの完全フリーズにも対応）
+
+上記はあくまで「pophugアプリのメインループ」を監視するものなので、Wi-Fiドライバの
+フリーズなどでOS・カーネルごと応答しなくなった場合には検知できない
+（systemd自体は生きているので、アプリ側からのWATCHDOG=1通知が来ないだけでは
+kill/再起動が起きない）。これに備え、Pi本体のハードウェアウォッチドッグ
+（`bcm2835_wdt`）を使い、systemd(PID1)自身が「システム全体が生きているか」を
+監視する仕組みも用意している。
+
+**この設定は手動作業不要。`pophug-hostname-setup`が起動のたびに冪等にチェックし、
+未設定の機体があれば自動的に以下を行う：**
+
+- `config.txt`（`/boot/firmware/config.txt`）に`dtparam=watchdog=on`を追加
+- `/etc/systemd/system.conf`の`[Manager]`セクションに`RuntimeWatchdogSec=15`を追加
+  （15秒間、システム全体からの応答が無ければハードウェアが強制的に再起動をかける）
+- 上記いずれかを追加した場合のみ、反映のためにその場で自動再起動（この処理は
+  サイネージ画面が表示される前＝pophug-signage.serviceの起動前に走るため、
+  利用者が「フリーズした」と誤認することはない）
+
+量産マスターイメージの時点で一度有効化しておけば、以降複製される機体は
+最初から設定済みの状態になるため、通常は複製のたびに再起動が発生することもない。
+既に配布済みの機体（このロジックを含まない古いイメージ由来の機体）は、
+アップデート適用後の初回起動時に自動で追いつく。
+
+有効化されているかどうかは、SSHで入れる状態であれば以下で確認できる:
+```bash
+cat /boot/firmware/config.txt | grep watchdog
+cat /etc/systemd/system.conf | grep RuntimeWatchdogSec
+systemctl show -p RuntimeWatchdogUSec   # 0以外の値ならsystemdに認識されている
+```
+
+**注意（限界）:** ハードウェアウォッチドッグは「systemd(PID1)自身が応答しているか」を
+見ているため、カーネル全体が完全に停止するケースには対応できるが、**Wi-Fiチップ/ドライバ
+だけがフリーズし、それ以外のシステムは正常に動き続けているケース**までは検知できない
+可能性がある（systemdは生きているので、ハードウェアウォッチドッグへの通知は問題なく
+続いてしまうため）。実際にこのタイプの症状（pingが`Host is down`になる等）に遭遇した
+場合は、別途「一定間隔で自機のネットワーク疎通を確認し、ダメならNetworkManagerの
+再起動や本体再起動を行う」ネットワーク専用の監視の追加を検討すること（現時点では未実装）。
+
 ## 動作環境
 
 - Mac: 検証用。pygameがPython 3.14に未対応のため、**Python 3.12系のvenv**で運用すること
@@ -292,6 +367,9 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
+| 4.13.0 | ハードウェアウォッチドッグ（カーネルごとの完全フリーズに対応、自動設定）を追加。Wi-Fiセットアップで非表示SSIDへ直接入力で確実に接続できるよう修正 |
+| 4.12.1 | pophug-netctlのSSID検証が厳しすぎて、iPhoneの個人ホットスポット名（アポストロフィ入り）等への接続が「invalid ssid」で失敗する不具合を修正 |
+| 4.12.0 | メインループのフリーズを検知して自動復帰する、systemd Watchdog向けの生存通知(sd_watchdog.py)を追加。有効化には別途systemdユニットの設定が必要 |
 | 4.11.2 | QR/取扱説明/Wi-Fiセットアップ画面とアップロードページに、現在のホスト名を常時表示するようにした |
 | 4.11.1 | アップデート機能でpophug-hostname-setup本体・systemdユニットも自動反映されるように改善（以前は手動コピーが必要だった） |
 | 4.11.0 | 量産用マスターイメージ作成の仕組みを追加。機体固有情報をリセットしてイメージ化しておけば、2台目以降はRaspberry Pi Imagerで書き込むだけでセットアップ完了する |

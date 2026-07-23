@@ -18,6 +18,7 @@ from config import *
 from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime, load_priority
 from version import __version__
 import wifi_setup
+import sd_watchdog
 from manual import MANUAL_PAGES
 
 try:
@@ -138,6 +139,13 @@ class PopSignage:
 
         if QR_BUTTON_ENABLED:
             self.setup_qr_button()
+
+        # systemdのWatchdog機能向け。起動処理がここまで完了したことを知らせ、
+        # 以降はrun()のメインループ内で一定間隔ごとに生存通知を送り続ける。
+        # NOTIFY_SOCKETが無い環境（Mac開発時など）では何も起きない。
+        self._watchdog_interval = sd_watchdog.watchdog_interval_seconds()
+        self._last_watchdog_time = 0
+        sd_watchdog.notify_ready()
 
     # ---------------- 画像読み込み ----------------
 
@@ -1032,8 +1040,18 @@ class PopSignage:
 
                 pygame.display.flip()
                 self.clock.tick(FPS)
+
+                # ウォッチドッグへの生存通知。ここまで到達した＝イベント処理・描画・
+                # 画面更新が一通り正常に完了した合図なので、フレームごとではなく
+                # 間隔を空けて送る（毎フレーム送っても意味は増えず、無駄が増えるだけのため）。
+                # 実際にメインループが固まった場合はこの行自体に到達しなくなるので、
+                # 通知が途絶え、systemd側のWatchdogSec=経過後に自動再起動される。
+                if now - self._last_watchdog_time >= self._watchdog_interval:
+                    self._last_watchdog_time = now
+                    sd_watchdog.notify_alive()
         except KeyboardInterrupt:
             log("Ctrl+Cを検知、終了します")
+            sd_watchdog.notify_stopping()
             pygame.quit()
             sys.exit(0)
 
