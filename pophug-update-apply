@@ -8,7 +8,10 @@
 #   2. staging_dir/pophug-hostname-setup があれば /usr/local/bin/pophug-hostname-setup を置き換える
 #   3. staging_dir/pophug-hostname-setup.service があれば
 #      /etc/systemd/system/pophug-hostname-setup.service を置き換え、daemon-reloadする
-#   4. pophug-signage.service を再起動する
+#   4. staging_dir/pophug-signage.service があれば
+#      /etc/systemd/system/pophug-signage.service を置き換え、daemon-reloadする
+#      （Type=notify・WatchdogSec等、本体サービスの起動方法自体の設定もここで配信できるようにする）
+#   5. pophug-signage.service を再起動する
 #
 # ファイルの展開・入れ替え・バックアップなど、それ以外の処理は
 # 全て非特権側(update_check.py)で行い、ここでは行わない。
@@ -24,6 +27,11 @@ import shutil
 import subprocess
 import sys
 import time
+
+NETCTL_DEST = "/usr/local/bin/pophug-netctl"
+HOSTNAME_SETUP_DEST = "/usr/local/bin/pophug-hostname-setup"
+HOSTNAME_SERVICE_DEST = "/etc/systemd/system/pophug-hostname-setup.service"
+SIGNAGE_SERVICE_DEST = "/etc/systemd/system/pophug-signage.service"
 
 
 def _install_helper(staging_dir, filename, dest_path, mode=0o755):
@@ -45,17 +53,29 @@ def main():
     if not os.path.isdir(staging_dir):
         sys.exit(f"staging dir not found: {staging_dir}")
 
-    if _install_helper(staging_dir, "pophug-netctl", "/usr/local/bin/pophug-netctl"):
+    if _install_helper(staging_dir, "pophug-netctl", NETCTL_DEST):
         print("pophug-netctl updated")
 
-    if _install_helper(staging_dir, "pophug-hostname-setup", "/usr/local/bin/pophug-hostname-setup"):
+    if _install_helper(staging_dir, "pophug-hostname-setup", HOSTNAME_SETUP_DEST):
         print("pophug-hostname-setup updated")
 
-    service_src = os.path.join(staging_dir, "pophug-hostname-setup.service")
-    if os.path.isfile(service_src):
-        shutil.copy(service_src, "/etc/systemd/system/pophug-hostname-setup.service")
-        subprocess.run(["systemctl", "daemon-reload"])
+    unit_changed = False
+
+    hostname_service_src = os.path.join(staging_dir, "pophug-hostname-setup.service")
+    if os.path.isfile(hostname_service_src):
+        shutil.copy(hostname_service_src, HOSTNAME_SERVICE_DEST)
+        unit_changed = True
         print("pophug-hostname-setup.service updated")
+
+    signage_service_src = os.path.join(staging_dir, "pophug-signage.service")
+    if os.path.isfile(signage_service_src):
+        shutil.copy(signage_service_src, SIGNAGE_SERVICE_DEST)
+        unit_changed = True
+        print("pophug-signage.service updated")
+
+    if unit_changed:
+        subprocess.run(["systemctl", "daemon-reload"])
+        print("daemon-reload done")
 
     # このスクリプト自身も元をたどれば pophug-signage.service から呼ばれた
     # 子プロセスなので、同じプロセスグループに属している。

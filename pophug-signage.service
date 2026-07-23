@@ -1,0 +1,18 @@
+[Unit]
+Description=KitchenCar POP Signage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=pophug
+WorkingDirectory=/home/pophug/pophug-signage
+ExecStart=/home/pophug/pophug-signage/venv/bin/python3 main.py
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+Environment=SDL_VIDEODRIVER=kmsdrm
+
+[Install]
+WantedBy=multi-user.target
