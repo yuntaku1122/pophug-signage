@@ -134,9 +134,12 @@ def _delete_connections_for_ssid(ssid):
 
 
 def cmd_connect(args):
-    if len(args) != 2:
-        sys.exit("usage: connect <ssid> <password>")
-    ssid, password = args
+    if len(args) not in (2, 3):
+        sys.exit("usage: connect <ssid> <password> [hidden]")
+    ssid, password = args[0], args[1]
+    hidden = len(args) == 3 and args[2] == "hidden"
+    if len(args) == 3 and not hidden:
+        sys.exit("usage: connect <ssid> <password> [hidden]")
     if not valid_ssid(ssid):
         sys.exit("invalid ssid")
     if not valid_password(password):
@@ -148,7 +151,13 @@ def cmd_connect(args):
 
     _delete_connections_for_ssid(ssid)
 
-    connect_cmd = ["nmcli", "device", "wifi", "connect", ssid, "hidden", "yes"]
+    connect_cmd = ["nmcli", "device", "wifi", "connect", ssid]
+    if hidden:
+        # 一覧に出てこない非表示（ステルス）ネットワーク向け。nmcliに積極的な
+        # プローブ接続を指示する。逆に、通常の(ビーコンを出している)ネットワーク
+        # に対してこれを付けると、Pi Zero 2Wの無線チップ(brcmfmac)との相性で
+        # 接続が不安定になるケースが確認されているため、明示指定時のみ付与する。
+        connect_cmd += ["hidden", "yes"]
     if password:
         connect_cmd += ["password", password]
     r = run(connect_cmd, timeout=45)

@@ -54,8 +54,11 @@ def stop_hotspot():
     return _run_netctl(["hotspot-stop"])
 
 
-def connect(ssid, password, timeout=45):
-    return _run_netctl(["connect", ssid, password], timeout=timeout)
+def connect(ssid, password, timeout=45, hidden=False):
+    args = ["connect", ssid, password]
+    if hidden:
+        args.append("hidden")
+    return _run_netctl(args, timeout=timeout)
 
 
 def scan_networks():

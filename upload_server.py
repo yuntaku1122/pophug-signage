@@ -685,18 +685,24 @@ WIFI_SETUP_PAGE = """
            border-radius:8px; font-size:16px; margin-top:8px; }
   .status { font-size:13px; color:#666; min-height:18px; margin-top:10px; }
   .hint { font-size:12px; color:#888; }
+  .hidden-checkbox { display:flex; align-items:center; gap:8px; font-size:13px; color:#555; margin:4px 0; }
+  .hidden-checkbox input { width:auto; margin:0; }
 </style>
 </head>
 <body>
   <div class="box">
     <h1>Wi-Fi設定</h1>
-    <p class="hint">接続したいWi-Fiを選ぶか、下に直接入力してください。一覧に出てこない非表示（ステルス）のWi-Fiも、SSIDとパスワードが分かっていれば直接入力で接続できます。</p>
+    <p class="hint">接続したいWi-Fiを選ぶか、下に直接入力してください。一覧に出てこない非表示（ステルス）のWi-Fiに接続したい場合は、SSID・パスワードを入力の上、下のチェックボックスを付けてください（通常のWi-Fiではチェックしないでください）。</p>
     <ul class="net-list" id="net-list">
       __NETWORK_ITEMS__
     </ul>
     <form id="wifi-form">
       <input type="text" id="ssid" name="ssid" placeholder="SSID（ネットワーク名）" autocapitalize="none" autocorrect="off">
       <input type="password" id="password" name="password" placeholder="パスワード（オープンな場合は空欄）">
+      <label class="hidden-checkbox">
+        <input type="checkbox" id="hidden" name="hidden">
+        一覧に出てこない非表示（ステルス）ネットワークとして接続する
+      </label>
       <button type="submit">このWi-Fiに接続する</button>
     </form>
     <p class="status" id="wifi-status"></p>
@@ -739,7 +745,9 @@ WIFI_SETUP_PAGE = """
       fetch('/wifi/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(document.getElementById('password').value)
+        body: 'ssid=' + encodeURIComponent(ssid) +
+          '&password=' + encodeURIComponent(document.getElementById('password').value) +
+          '&hidden=' + (document.getElementById('hidden').checked ? 'on' : '')
       })
         .then(function () {
           pollWifiStatus(status, 0);
@@ -754,7 +762,7 @@ WIFI_SETUP_PAGE = """
       // 成功した場合はPi側のネットワークが切り替わるため、途中でこの通信自体が
       // 届かなくなる（＝それ自体が成功のサインになる）。
       if (attempt >= 35) {
-        status.textContent = '応答が無くなりました。おそらく接続に成功し、この端末がセットアップ用Wi-Fiから切断されたためです。サイネージの画面を確認してください。';
+        status.textContent = '応答が無くなりました。この端末がPophugのセットアップ用Wi-Fiから切断されたため、成功・失敗のどちらかは判別できません。まずサイネージの画面を確認してください。スライドショーに戻っていれば成功です。まだ接続情報の画面のままなら、失敗して元のセットアップ用Wi-Fi（pophug-setup-）に自動で戻っているはずなので、スマホをそのWi-Fiに繋ぎ直してこのページを開き直してください。';
         return;
       }
       fetch('/wifi/status', { headers: { 'Accept': 'application/json' } })
@@ -772,7 +780,7 @@ WIFI_SETUP_PAGE = """
           }
         })
         .catch(function () {
-          status.textContent = '応答が無くなりました。おそらく接続に成功し、この端末がセットアップ用Wi-Fiから切断されたためです。サイネージの画面を確認してください。';
+          status.textContent = '応答が無くなりました。この端末がPophugのセットアップ用Wi-Fiから切断されたため、成功・失敗のどちらかは判別できません。まずサイネージの画面を確認してください。スライドショーに戻っていれば成功です。まだ接続情報の画面のままなら、失敗して元のセットアップ用Wi-Fi（pophug-setup-）に自動で戻っているはずなので、スマホをそのWi-Fiに繋ぎ直してこのページを開き直してください。';
         });
     }
 
@@ -1099,17 +1107,18 @@ def create_app(image_folder):
     def wifi_connect():
         ssid = request.form.get("ssid", "").strip()
         password = request.form.get("password", "")
+        hidden = request.form.get("hidden") == "on"
         if not ssid:
             return {"error": "ssid is required"}, 400
         if password and not (8 <= len(password) <= 63):
             return {"error": "password must be 8-63 characters, or empty for open networks"}, 400
 
-        print(f"[wifi] 接続要求を受け付けました: SSID={ssid}")
+        print(f"[wifi] 接続要求を受け付けました: SSID={ssid}{' (非表示ネットワーク指定)' if hidden else ''}")
         wifi_connect_status.update({"state": "connecting", "ssid": ssid, "error": None})
 
         def do_connect():
             time.sleep(1)  # レスポンスをブラウザに返してから実行する
-            ok, out, err = wifi_setup.connect(ssid, password)
+            ok, out, err = wifi_setup.connect(ssid, password, hidden=hidden)
             if ok:
                 print(f"[wifi] 接続成功: {out}")
                 wifi_connect_status.update({"state": "success", "ssid": ssid, "error": None})
