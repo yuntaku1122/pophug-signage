@@ -116,12 +116,14 @@ def settings_mtime(image_folder):
 
 
 # ---------------- 優先表示タグ ----------------
-# アップロードページで「優先表示1」「優先表示2」に設定した画像のファイル名を
-# images/.priority.json に {ファイル名: "priority1"/"priority2"} の形で保存する。
+# アップロードページで「優先表示1」〜「優先表示5」に設定した画像のファイル名を
+# images/.priority.json に {ファイル名: "priority1"〜"priority5"} の形で保存する。
 # main.py側は、通常の画像を一定枚数表示するごとに、優先表示に設定された画像を
-# まとめて割り込ませる（店のロゴ・メニュー一覧などを定期的に挟み込む用途）。
+# 数字の若い順（1→2→3→4→5）にまとめて割り込ませる（店のロゴ・メニュー一覧などを
+# 定期的に挟み込む用途）。同じ優先度の画像が複数ある場合は、ファイル名の
+# 昇順（sorted()の順）で表示される。
 
-PRIORITY_TAGS = ("priority1", "priority2")
+PRIORITY_TAGS = ("priority1", "priority2", "priority3", "priority4", "priority5")
 
 
 def _priority_path(image_folder):
@@ -129,7 +131,7 @@ def _priority_path(image_folder):
 
 
 def load_priority(image_folder):
-    """{ファイル名: "priority1"/"priority2"} の辞書を返す（タグが無いファイルは含まれない）"""
+    """{ファイル名: "priority1"〜"priority5"} の辞書を返す（タグが無いファイルは含まれない）"""
     path = _priority_path(image_folder)
     if not os.path.exists(path):
         return {}

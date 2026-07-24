@@ -15,7 +15,7 @@ import socket
 import threading
 from datetime import datetime
 from config import *
-from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime, load_priority
+from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime, load_priority, PRIORITY_TAGS
 from version import __version__
 import wifi_setup
 import sd_watchdog
@@ -198,12 +198,14 @@ class PopSignage:
     @staticmethod
     def _build_ordered_files(files, priority_map, interval):
         """通常画像と優先表示画像を組み合わせた表示順序のファイル名リストを作る。
-        通常画像をinterval枚表示するごとに、優先表示1→優先表示2の順でまとめて割り込ませる。
-        優先表示に設定された画像は、通常のローテーションからは除外される。"""
-        normal = [f for f in files if priority_map.get(f) not in ("priority1", "priority2")]
-        priority1 = [f for f in files if priority_map.get(f) == "priority1"]
-        priority2 = [f for f in files if priority_map.get(f) == "priority2"]
-        priority = priority1 + priority2
+        通常画像をinterval枚表示するごとに、優先表示1→2→3→4→5の順でまとめて
+        割り込ませる。優先表示に設定された画像は、通常のローテーションからは
+        除外される。同じ優先度内では、files（ファイル名の昇順）の順序を維持する。"""
+        priority_tags = PRIORITY_TAGS
+        normal = [f for f in files if priority_map.get(f) not in priority_tags]
+        priority = []
+        for tag in priority_tags:
+            priority.extend(f for f in files if priority_map.get(f) == tag)
 
         if not priority or interval <= 0:
             return normal

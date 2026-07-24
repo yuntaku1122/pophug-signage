@@ -204,9 +204,11 @@ UPLOAD_PAGE = """
 
   <div class="box" style="margin-top:16px;">
     <h1>優先表示</h1>
-    <p class="hint" style="margin:0 0 12px;">写真ごとに「優先表示1」「優先表示2」を設定すると、
-      通常の写真からは外れ、指定した枚数ごとにまとめて割り込み表示されます。
-      店のロゴやメニュー一覧を定期的に見せたい時に使えます。</p>
+    <p class="hint" style="margin:0 0 12px;">写真ごとに「優先表示1」〜「優先表示5」を設定すると、
+      通常の写真からは外れ、指定した枚数ごとにまとめて割り込み表示されます（数字の若い順に表示）。
+      店のロゴやメニュー一覧を定期的に見せたい時に使えます。
+      同じ優先表示番号の写真が複数ある場合は、ファイル名の順（あいうえお順・数字順）で表示されるので、
+      表示順を指定したい場合はファイル名の先頭に「01_」「02_」のような連番を付けてアップロードしてください。</p>
     <div class="setting-row">
       <label>通常の写真を何枚表示するごとに割り込ませるか
         <span id="priority-interval-value">__PRIORITY_INTERVAL__</span>枚ごと</label>
@@ -331,7 +333,7 @@ UPLOAD_PAGE = """
             existingBadge.remove();
           }
           if (tag !== 'normal') {
-            var labels = { priority1: '優先表示1', priority2: '優先表示2' };
+            var labels = { priority1: '優先表示1', priority2: '優先表示2', priority3: '優先表示3', priority4: '優先表示4', priority5: '優先表示5' };
             var badge = document.createElement('span');
             badge.className = 'priority-badge';
             badge.textContent = labels[tag] || tag;
@@ -618,6 +620,9 @@ PRIORITY_LABELS = {
     "normal": "通常",
     "priority1": "優先表示1",
     "priority2": "優先表示2",
+    "priority3": "優先表示3",
+    "priority4": "優先表示4",
+    "priority5": "優先表示5",
 }
 
 
