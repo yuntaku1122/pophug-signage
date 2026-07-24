@@ -42,7 +42,7 @@ BG_COLOR = (0, 0, 0)         # contain/coverモードで余白が出た場合の
 # ワイヤレスアップロードサーバー設定
 UPLOAD_ENABLED = True
 UPLOAD_PORT = 8080
-UPLOAD_HOST = "0.0.0.0"      # 同一Wi-Fi内のiPhoneから見えるように
+UPLOAD_HOST = "::"           # IPv4/IPv6両対応（同一Wi-Fi内のiPhone・Macどちらからも見えるように）
 
 # QRコード表示ボタン設定
 # ラズパイ単体運用時、IPアドレスが分からずアップロードサーバーにアクセスできない問題への対応。
