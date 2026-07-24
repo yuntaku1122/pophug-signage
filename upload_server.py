@@ -685,16 +685,17 @@ WIFI_SETUP_PAGE = """
            border-radius:8px; font-size:16px; margin-top:8px; }
   .status { font-size:13px; color:#666; min-height:18px; margin-top:10px; }
   .hint { font-size:12px; color:#888; }
-  .hidden-checkbox { display:flex; align-items:center; gap:8px; font-size:13px; color:#555; margin:4px 0; }
-  .hidden-checkbox input { width:auto; margin:0; }
   .show-password-checkbox { display:flex; align-items:center; gap:8px; font-size:13px; color:#555; margin:4px 0; }
   .show-password-checkbox input { width:auto; margin:0; }
+  .current-connection { font-size:13px; color:#228b22; background:#f0f7f0; border-radius:8px;
+    padding:10px 12px; margin:0 0 14px; }
 </style>
 </head>
 <body>
   <div class="box">
     <h1>Wi-Fi設定</h1>
-    <p class="hint">接続したいWi-Fiを選ぶか、下に直接入力してください。一覧に出てこない非表示（ステルス）のWi-Fiに接続したい場合は、SSID・パスワードを入力の上、下のチェックボックスを付けてください（通常のWi-Fiではチェックしないでください）。</p>
+    <p class="hint">接続したいWi-Fiを選ぶか、下に直接入力してください。一覧に出てこない非表示（ステルス）のWi-Fiも、SSIDとパスワードが分かっていれば直接入力で接続できます（通常の接続を試して見つからない場合、自動的に非表示ネットワーク向けの接続方法を試します）。</p>
+    __CURRENT_CONNECTION__
     <ul class="net-list" id="net-list">
       __NETWORK_ITEMS__
     </ul>
@@ -704,10 +705,6 @@ WIFI_SETUP_PAGE = """
       <label class="show-password-checkbox">
         <input type="checkbox" id="show-password">
         パスワードを表示する
-      </label>
-      <label class="hidden-checkbox">
-        <input type="checkbox" id="hidden" name="hidden">
-        一覧に出てこない非表示（ステルス）ネットワークとして接続する
       </label>
       <button type="submit">このWi-Fiに接続する</button>
     </form>
@@ -756,8 +753,7 @@ WIFI_SETUP_PAGE = """
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'ssid=' + encodeURIComponent(ssid) +
-          '&password=' + encodeURIComponent(document.getElementById('password').value) +
-          '&hidden=' + (document.getElementById('hidden').checked ? 'on' : '')
+          '&password=' + encodeURIComponent(document.getElementById('password').value)
       })
         .then(function () {
           pollWifiStatus(status, 0);
@@ -1101,8 +1097,20 @@ def create_app(image_folder):
             "setup_ap_password": WIFI_SETUP_DEFAULT_PASSWORD,
         })
 
+        current = wifi_setup.current_connection_info()
+        if current:
+            current_html = (
+                f'<p class="current-connection">現在接続中: {_h(current["ssid"])}'
+                f'{" (" + _h(current["ip"]) + ")" if current["ip"] else ""}</p>'
+            )
+        elif wifi_setup.is_hotspot_active():
+            current_html = '<p class="current-connection">現在: 外部Wi-Fiには未接続（このセットアップ用アクセスポイントで待機中）</p>'
+        else:
+            current_html = '<p class="current-connection">現在: どのWi-Fiにも接続されていません</p>'
+
         html = (WIFI_SETUP_PAGE
                 .replace("__NETWORK_ITEMS__", render_network_items(networks))
+                .replace("__CURRENT_CONNECTION__", current_html)
                 .replace("__AP_SSID__", _h(ap_settings.get("setup_ap_ssid", "")))
                 .replace("__AP_PASSWORD__", _h(ap_settings.get("setup_ap_password", ""))))
         return html
@@ -1117,18 +1125,17 @@ def create_app(image_folder):
     def wifi_connect():
         ssid = request.form.get("ssid", "").strip()
         password = request.form.get("password", "")
-        hidden = request.form.get("hidden") == "on"
         if not ssid:
             return {"error": "ssid is required"}, 400
         if password and not (8 <= len(password) <= 63):
             return {"error": "password must be 8-63 characters, or empty for open networks"}, 400
 
-        print(f"[wifi] 接続要求を受け付けました: SSID={ssid}{' (非表示ネットワーク指定)' if hidden else ''}")
+        print(f"[wifi] 接続要求を受け付けました: SSID={ssid}")
         wifi_connect_status.update({"state": "connecting", "ssid": ssid, "error": None})
 
         def do_connect():
             time.sleep(1)  # レスポンスをブラウザに返してから実行する
-            ok, out, err = wifi_setup.connect(ssid, password, hidden=hidden)
+            ok, out, err = wifi_setup.connect(ssid, password)
             if ok:
                 print(f"[wifi] 接続成功: {out}")
                 wifi_connect_status.update({"state": "success", "ssid": ssid, "error": None})

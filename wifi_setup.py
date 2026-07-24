@@ -54,11 +54,8 @@ def stop_hotspot():
     return _run_netctl(["hotspot-stop"])
 
 
-def connect(ssid, password, timeout=45, hidden=False):
-    args = ["connect", ssid, password]
-    if hidden:
-        args.append("hidden")
-    return _run_netctl(args, timeout=timeout)
+def connect(ssid, password, timeout=45):
+    return _run_netctl(["connect", ssid, password], timeout=timeout)
 
 
 def scan_networks():
@@ -115,6 +112,33 @@ def is_client_connected():
         return False
     except Exception:
         return False
+
+
+def current_connection_info():
+    """現在クライアントとして接続しているWi-FiのSSIDとIPアドレスを返す
+    （read-onlyなのでsudo不要）。繋がっていなければNoneを返す。"""
+    try:
+        r = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in r.stdout.splitlines():
+            parts = line.split(":")
+            if len(parts) >= 3 and parts[1] == "802-11-wireless" and parts[0] != HOTSPOT_CON_NAME:
+                ssid, device = parts[0], parts[2]
+                ip = ""
+                ip_r = subprocess.run(
+                    ["nmcli", "-t", "-f", "IP4.ADDRESS", "device", "show", device],
+                    capture_output=True, text=True, timeout=10,
+                )
+                for ip_line in ip_r.stdout.splitlines():
+                    if ip_line.startswith("IP4.ADDRESS"):
+                        ip = ip_line.split(":", 1)[1].split("/")[0]
+                        break
+                return {"ssid": ssid, "ip": ip}
+        return None
+    except Exception:
+        return None
 
 
 def current_network_mode():
