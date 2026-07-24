@@ -687,6 +687,8 @@ WIFI_SETUP_PAGE = """
   .hint { font-size:12px; color:#888; }
   .hidden-checkbox { display:flex; align-items:center; gap:8px; font-size:13px; color:#555; margin:4px 0; }
   .hidden-checkbox input { width:auto; margin:0; }
+  .show-password-checkbox { display:flex; align-items:center; gap:8px; font-size:13px; color:#555; margin:4px 0; }
+  .show-password-checkbox input { width:auto; margin:0; }
 </style>
 </head>
 <body>
@@ -699,6 +701,10 @@ WIFI_SETUP_PAGE = """
     <form id="wifi-form">
       <input type="text" id="ssid" name="ssid" placeholder="SSID（ネットワーク名）" autocapitalize="none" autocorrect="off">
       <input type="password" id="password" name="password" placeholder="パスワード（オープンな場合は空欄）">
+      <label class="show-password-checkbox">
+        <input type="checkbox" id="show-password">
+        パスワードを表示する
+      </label>
       <label class="hidden-checkbox">
         <input type="checkbox" id="hidden" name="hidden">
         一覧に出てこない非表示（ステルス）ネットワークとして接続する
@@ -730,6 +736,10 @@ WIFI_SETUP_PAGE = """
         item.classList.add('selected');
         ssidInput.value = item.dataset.ssid;
       });
+    });
+
+    document.getElementById('show-password').addEventListener('change', function (e) {
+      document.getElementById('password').type = e.target.checked ? 'text' : 'password';
     });
 
     document.getElementById('wifi-form').addEventListener('submit', function (e) {
