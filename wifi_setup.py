@@ -8,11 +8,14 @@
 # （このファイル自身はroot権限を持たない）。
 # ============================================
 
+import os
 import re
 import subprocess
 
 NETCTL_PATH = "/usr/local/bin/pophug-netctl"
 HOTSPOT_CON_NAME = "pophug-setup-ap"
+# pophug-netctl側のRETRY_MARKER_PATHと同じ値（root権限が無いのでread-onlyの存在確認だけ行う）
+RETRY_MARKER_PATH = "/tmp/pophug-wifi-retry-in-progress"
 
 
 def get_wlan_mac(iface="wlan0"):
@@ -56,6 +59,19 @@ def stop_hotspot():
 
 def connect(ssid, password, timeout=45):
     return _run_netctl(["connect", ssid, password], timeout=timeout)
+
+
+def retry_known_network(timeout=40):
+    """過去に接続したことがある(保存済みプロファイルが残っている)Wi-Fiへの
+    再接続を試みる。SSID・パスワードの再入力は不要。"""
+    return _run_netctl(["retry-known"], timeout=timeout)
+
+
+def is_wifi_retry_in_progress():
+    """retry_known_network()の処理が今まさに実行中か（read-onlyなのでsudo不要）。
+    処理中は一時的にアクセスポイントが落ちるが、main.py側がこれを
+    「スタンドアロンモード終了」と誤検知しないよう判定に使う。"""
+    return os.path.exists(RETRY_MARKER_PATH)
 
 
 def scan_networks():

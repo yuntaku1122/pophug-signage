@@ -14,6 +14,7 @@
 #   pophug-netctl hotspot-stop
 #   pophug-netctl scan
 #   pophug-netctl connect <ssid> <password>
+#   pophug-netctl retry-known
 #
 # インストール:
 #   sudo cp scripts/pophug-netctl /usr/local/bin/
@@ -21,10 +22,18 @@
 #   sudo chown root:root /usr/local/bin/pophug-netctl
 # ============================================
 
+import os
 import subprocess
 import sys
 
 HOTSPOT_CON_NAME = "pophug-setup-ap"
+
+# retry-known実行中であることを示す目印ファイル。
+# Pi Zero 2Wは無線が1系統しか無く、この処理中はセットアップ用アクセスポイントを
+# 一時的に落とすため、main.py側がその一瞬を「アクセスポイントが終了した
+# （=スタンドアロンモード終了）」と誤検知しないよう、存在チェック用に置いておく
+# （wifi_setup.py側はroot権限が無いのでread-onlyで存在確認するだけ）。
+RETRY_MARKER_PATH = "/tmp/pophug-wifi-retry-in-progress"
 
 
 def run(cmd, timeout=30):
@@ -177,11 +186,64 @@ def cmd_connect(args):
     print("connected")
 
 
+def _active_wireless_connections():
+    """現在アクティブな802-11-wireless接続の(名前, タイプ)一覧を返す"""
+    r = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"])
+    result = []
+    for line in r.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2 and parts[1] == "802-11-wireless":
+            result.append(parts[0])
+    return result
+
+
+def cmd_retry_known(args):
+    """過去に接続したことがある(=保存済みプロファイルが残っている)Wi-Fiへの
+    再接続をNetworkManagerに任せて試みる。SSID・パスワードの再入力は不要。
+
+    Pi Zero 2Wは無線が1系統しか無いため、セットアップ用アクセスポイントが
+    起動中はスキャン・接続ができない。一旦落として試し、既知のネットワークが
+    見つからず失敗した場合は同じアクセスポイントに戻す。"""
+    hotspot_was_active = HOTSPOT_CON_NAME in _active_wireless_connections()
+
+    try:
+        with open(RETRY_MARKER_PATH, "w", encoding="utf-8") as f:
+            f.write("1")
+    except OSError as e:
+        print(f"目印ファイルの作成に失敗しました（無視して続行）: {e}")
+
+    try:
+        if hotspot_was_active:
+            run(["nmcli", "connection", "down", HOTSPOT_CON_NAME])
+
+        # 「wlan0にとって今一番良い、既知の接続を試す」というnmcli標準のコマンド。
+        # 新規にプロファイルを作らず、保存済みのものだけを対象にする。
+        r = run(["nmcli", "device", "connect", "wlan0"], timeout=30)
+
+        connected_to_known = any(
+            name != HOTSPOT_CON_NAME for name in _active_wireless_connections()
+        )
+
+        if r.returncode != 0 or not connected_to_known:
+            if hotspot_was_active:
+                run(["nmcli", "connection", "up", HOTSPOT_CON_NAME])
+            reason = (r.stderr or r.stdout or "").strip() or "近くに既知のWi-Fiが見つかりませんでした"
+            sys.exit(f"retry failed: {reason}")
+
+        print("connected")
+    finally:
+        try:
+            os.remove(RETRY_MARKER_PATH)
+        except OSError:
+            pass
+
+
 COMMANDS = {
     "hotspot-start": cmd_hotspot_start,
     "hotspot-stop": cmd_hotspot_stop,
     "scan": cmd_scan,
     "connect": cmd_connect,
+    "retry-known": cmd_retry_known,
 }
 
 

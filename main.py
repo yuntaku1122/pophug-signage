@@ -506,7 +506,11 @@ class PopSignage:
             log("qrcodeライブラリが未インストールのためQR表示できません（pip install qrcode[pil]）")
             return
 
-        url = UPLOAD_URL_OVERRIDE or f"http://{self._get_local_ip()}:{UPLOAD_PORT}"
+        # IPアドレスは接続先Wi-Fiが変わる・DHCPで再割り当てされるたびに変化し、
+        # その都度QRを表示し直す必要があった。mDNS(.local)ホスト名なら、SSH接続
+        # (README参照)と同じ仕組みでアドレスが変わっても同じURLで開けるため、
+        # 明示的な上書き(UPLOAD_URL_OVERRIDE)が無い場合はこちらを優先する。
+        url = UPLOAD_URL_OVERRIDE or f"http://{socket.gethostname()}.local:{UPLOAD_PORT}"
         try:
             qr = qrcode.QRCode(box_size=8, border=2)
             qr.add_data(url)
@@ -1000,7 +1004,9 @@ class PopSignage:
                     # 既に落とされていないか・タイムアウトしていないかを確認する
                     if now - self.last_wifi_setup_check_time >= 2:
                         self.last_wifi_setup_check_time = now
-                        if not wifi_setup.is_hotspot_active():
+                        # retry-known実行中は既知Wi-Fiを試すために一時的にAPを落としているだけなので、
+                        # その間だけは「外部要因でAPが終了した」との誤検知を避ける
+                        if not wifi_setup.is_hotspot_active() and not wifi_setup.is_wifi_retry_in_progress():
                             # 外部要因(Web側での接続成功など)でアクセスポイントが終了した
                             if self.standalone_active:
                                 log("アクセスポイントが終了したため、スタンドアロンモードを終了します")

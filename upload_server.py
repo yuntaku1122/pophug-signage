@@ -676,6 +676,9 @@ WIFI_SETUP_PAGE = """
   body { font-family: -apple-system, sans-serif; background:#f5f5f0; margin:0; padding:24px; }
   h1 { font-size:20px; color:#228b22; }
   h2 { font-size:15px; color:#333; margin:24px 0 8px; }
+  .back-link { display:inline-block; margin-bottom:10px; font-size:14px; color:#228b22;
+               text-decoration:none; }
+  .back-link:active { opacity:0.6; }
   .box { background:#fff; border-radius:12px; padding:20px; box-shadow:0 2px 8px rgba(0,0,0,0.08); }
   .net-list { list-style:none; padding:0; margin:0 0 16px; }
   .net-item { padding:12px; border:1px solid #ddd; border-radius:8px; margin-bottom:8px;
@@ -698,9 +701,11 @@ WIFI_SETUP_PAGE = """
 </head>
 <body>
   <div class="box">
+    <a href="/" class="back-link">← POP画像アップロードに戻る</a>
     <h1>Wi-Fi設定</h1>
     <p class="hint">接続したいWi-Fiを選ぶか、下に直接入力してください。一覧に出てこない非表示（ステルス）のWi-Fiも、SSIDとパスワードが分かっていれば直接入力で接続できます（通常の接続を試して見つからない場合、自動的に非表示ネットワーク向けの接続方法を試します）。</p>
     __CURRENT_CONNECTION__
+    __RETRY_KNOWN_BLOCK__
     <ul class="net-list" id="net-list">
       __NETWORK_ITEMS__
     </ul>
@@ -795,6 +800,51 @@ WIFI_SETUP_PAGE = """
         });
     }
 
+    var retryBtn = document.getElementById('retry-known-btn');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', function () {
+        var status = document.getElementById('retry-known-status');
+        retryBtn.disabled = true;
+        status.textContent = '既知のWi-Fiへの再接続を試みています…（この間、このスマホは一時的に切断されることがあります）';
+        fetch('/wifi/retry-known', { method: 'POST' })
+          .then(function () {
+            pollRetryStatus(status, retryBtn, 0);
+          })
+          .catch(function () {
+            status.textContent = '送信しました。この端末は一時的に切断された可能性があります。サイネージの画面を確認してください。';
+          });
+      });
+    }
+
+    function pollRetryStatus(status, btn, attempt) {
+      // 失敗した場合はこのセットアップ用Wi-Fiに戻ったままなのでポーリングで結果を受け取れる。
+      // 成功した場合はPi側のネットワークが切り替わるため、途中でこの通信自体が
+      // 届かなくなる（＝それ自体が成功のサインになる）。
+      if (attempt >= 35) {
+        status.textContent = '応答が無くなりました。まずサイネージの画面を確認してください。スライドショーに戻っていれば成功です。まだこの接続情報の画面のままなら、失敗して元のアクセスポイントに戻っているはずなので、スマホをそのWi-Fiに繋ぎ直してこのページを開き直してください。';
+        btn.disabled = false;
+        return;
+      }
+      fetch('/wifi/retry-status', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.state === 'trying') {
+            status.textContent = '接続を試みています…（サイネージの画面を確認してください）';
+            setTimeout(function () { pollRetryStatus(status, btn, attempt + 1); }, 1500);
+          } else if (data.state === 'failed') {
+            status.textContent = '再接続できませんでした: ' + data.error;
+            btn.disabled = false;
+          } else if (data.state === 'success') {
+            status.textContent = '接続に成功しました。サイネージの画面がスライドショーに戻っているか確認してください。';
+          } else {
+            setTimeout(function () { pollRetryStatus(status, btn, attempt + 1); }, 1500);
+          }
+        })
+        .catch(function () {
+          status.textContent = '応答が無くなりました。まずサイネージの画面を確認してください。スライドショーに戻っていれば成功です。まだこの接続情報の画面のままなら、失敗して元のアクセスポイントに戻っているはずなので、スマホをそのWi-Fiに繋ぎ直してこのページを開き直してください。';
+        });
+    }
+
     document.getElementById('ap-form').addEventListener('submit', function (e) {
       e.preventDefault();
       var status = document.getElementById('ap-status');
@@ -822,6 +872,13 @@ WIFI_SETUP_PAGE = """
   </script>
 </body>
 </html>
+"""
+
+
+RETRY_KNOWN_BLOCK = """
+    <p class="hint">以前このpophugが接続したことのあるWi-Fiが近くにあれば、SSID・パスワードを入力し直さずに再接続を試せます。</p>
+    <button id="retry-known-btn" type="button">既知のWi-Fiへの再接続を試す</button>
+    <p class="status" id="retry-known-status"></p>
 """
 
 
@@ -1103,19 +1160,25 @@ def create_app(image_folder):
         })
 
         current = wifi_setup.current_connection_info()
+        is_standalone = wifi_setup.is_hotspot_active()
         if current:
             current_html = (
                 f'<p class="current-connection">現在接続中: {_h(current["ssid"])}'
                 f'{" (" + _h(current["ip"]) + ")" if current["ip"] else ""}</p>'
             )
-        elif wifi_setup.is_hotspot_active():
+        elif is_standalone:
             current_html = '<p class="current-connection">現在: 外部Wi-Fiには未接続（このセットアップ用アクセスポイントで待機中）</p>'
         else:
             current_html = '<p class="current-connection">現在: どのWi-Fiにも接続されていません</p>'
 
+        # 「既知のWi-Fiへの再接続」は、このスマホがpophugの一時APに繋がっている
+        # （＝スタンドアロン待機中の）時だけ意味があるので、その時だけ表示する
+        retry_known_html = RETRY_KNOWN_BLOCK if is_standalone else ""
+
         html = (WIFI_SETUP_PAGE
                 .replace("__NETWORK_ITEMS__", render_network_items(networks))
                 .replace("__CURRENT_CONNECTION__", current_html)
+                .replace("__RETRY_KNOWN_BLOCK__", retry_known_html)
                 .replace("__AP_SSID__", _h(ap_settings.get("setup_ap_ssid", "")))
                 .replace("__AP_PASSWORD__", _h(ap_settings.get("setup_ap_password", ""))))
         return html
@@ -1158,6 +1221,36 @@ def create_app(image_folder):
     @app.route("/wifi/status")
     def wifi_connect_status_route():
         return wifi_connect_status
+
+    # 既知のWi-Fiへの再接続試行の結果をポーリングで確認できるよう、プロセス内に保持しておく
+    # （/wifi/connect・wifi_connect_statusと同じ考え方。パスワード再入力は不要な点だけが違う）
+    wifi_retry_status = {"state": "idle", "error": None}
+
+    @app.route("/wifi/retry-known", methods=["POST"])
+    def wifi_retry_known():
+        print("[wifi] 既知のWi-Fiへの再接続要求を受け付けました")
+        wifi_retry_status.update({"state": "trying", "error": None})
+
+        def do_retry():
+            time.sleep(1)  # レスポンスをブラウザに返してから実行する
+            ok, out, err = wifi_setup.retry_known_network()
+            if ok:
+                print(f"[wifi] 既知のWi-Fiへの再接続に成功: {out}")
+                wifi_retry_status.update({"state": "success", "error": None})
+            else:
+                error_message = err or out or "不明なエラー"
+                print(f"[wifi] 既知のWi-Fiへの再接続に失敗: {error_message}")
+                wifi_retry_status.update({"state": "failed", "error": error_message})
+
+        threading.Thread(target=do_retry, daemon=True).start()
+
+        if request.headers.get("Accept") == "application/json":
+            return {"status": "trying"}, 200
+        return redirect("/wifi")
+
+    @app.route("/wifi/retry-status")
+    def wifi_retry_status_route():
+        return wifi_retry_status
 
     @app.route("/shutdown", methods=["POST"])
     def shutdown():
