@@ -934,9 +934,10 @@ def create_app(image_folder):
         rotation = int(settings.get("rotation", DEFAULT_ROTATION)) % 360
         priority_interval = int(round(float(settings.get("priority_interval", DEFAULT_PRIORITY_INTERVAL))))
 
+        current_conn = wifi_setup.current_connection_info()
         network_mode_labels = {
             "standalone": "スタンドアロン（本機がWi-Fiを提供中・外部ネット無し）",
-            "client": "外部Wi-Fiに接続中",
+            "client": f"外部Wi-Fiに接続中（{current_conn['ssid']}）" if current_conn else "外部Wi-Fiに接続中",
             "none": "未接続",
         }
         network_mode_label = network_mode_labels.get(wifi_setup.current_network_mode(), "不明")
