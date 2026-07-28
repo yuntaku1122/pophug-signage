@@ -53,16 +53,48 @@ sudo journalctl --rotate 2>/dev/null || true
 sudo journalctl --vacuum-time=1s 2>/dev/null || true
 
 echo ""
+echo "--- イメージファイルを小さくするためのクリーンアップ ---"
+echo "  apt/pipのキャッシュを削除..."
+sudo apt-get clean
+rm -rf "$HOME/.cache/pip"
+
+echo "  Pythonの__pycache__を削除..."
+find "$HOME/pophug-signage" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
+echo "  /tmp を掃除..."
+sudo find /tmp -mindepth 1 -delete 2>/dev/null || true
+
+echo "  未使用領域をゼロ埋め（この後Mac側で圧縮する際に効果が大きくなります。"
+echo "  ディスクの空き容量によっては数分かかります）..."
+sudo dd if=/dev/zero of=/zerofill bs=1M 2>/dev/null || true
+sudo rm -f /zerofill
+sync
+
+echo ""
 echo "=== 完了しました ==="
 echo "このまま以下を実行してPiの電源を切り、SDカードを取り出してイメージ化してください。"
 echo ""
 echo "  sudo shutdown -h now"
 echo ""
 echo "Mac側でのイメージ化手順（Piの電源を切った後、SDカードを挿した状態で）:"
-echo "  diskutil list                                    # SDカードのディスク番号を確認"
-echo "  sudo dd if=/dev/rdiskN of=~/pophug-master.img bs=4m status=progress"
 echo ""
-echo "以降は Raspberry Pi Imager で pophug-master.img を選んで書き込むだけで、"
-echo "新しい1台をセットアップできます（git clone・pip install等は不要）。"
+echo "  【推奨】ApplePi-Baker（無料・Mac用GUIアプリ）を使うと、使用領域まで自動で"
+echo "  縮小しながらバックアップできるため、ddで生成する場合よりファイルがかなり"
+echo "  小さくなります。「Backup」で対象ディスクを選び、「Shrink」にチェックを"
+echo "  入れて実行してください（.imgまたは.img.gz等で保存可）。"
+echo "  https://www.tweaking4all.com/software/macosx-software/applepi-baker-v2/"
+echo "  ※ macOSのバージョンによってはShrinkが正しく動かない報告もあるため、"
+echo "  一度小さいSDカードに書き戻して起動確認することをお勧めします。"
+echo ""
+echo "  【代替】上記が使えない場合は、従来通りddで生成してから手元でgzip圧縮"
+echo "  してください（パーティション自体は縮小されないため、元のSDカードと"
+echo "  同じ容量以上のカードにしか書き込めない点に注意）:"
+echo "    diskutil list                                    # SDカードのディスク番号を確認"
+echo "    sudo dd if=/dev/rdiskN of=~/pophug-master.img bs=4m status=progress"
+echo "    gzip ~/pophug-master.img                          # -> pophug-master.img.gz"
+echo ""
+echo "以降は Raspberry Pi Imager で作成したイメージ（.imgまたは.img.gz等の圧縮形式も"
+echo "そのまま選べます）を選んで書き込むだけで、新しい1台をセットアップできます"
+echo "（git clone・pip install等は不要）。"
 echo "初回起動時に、Wi-Fi接続情報・写真・アップデートのバックアップも"
 echo "自動的に消去された上で、機体ごとに一意なホスト名が設定されます。"

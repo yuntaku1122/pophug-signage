@@ -91,23 +91,35 @@ Wi-Fiセットアップモードのボタン操作まで、全て最初から使
    bash pophug-image-prepare
    ```
 
-   ホスト名を`pophug`に戻す、SSHホスト鍵を削除、`machine-id`を消去、といった処理を行う。
-   Wi-Fi接続情報・写真・アップデートのバックアップは、次回起動時に`pophug-hostname-setup`
-   が自動で消去するため、ここでは扱わない。最後に案内される通り`sudo shutdown -h now`で
-   電源を切り、SDカードを取り出す。
+   ホスト名を`pophug`に戻す、SSHホスト鍵を削除、`machine-id`を消去、apt/pipキャッシュや
+   `__pycache__`の削除、未使用領域のゼロ埋め（後段の圧縮率を上げるため）といった処理を
+   行う。Wi-Fi接続情報・写真・アップデートのバックアップは、次回起動時に
+   `pophug-hostname-setup`が自動で消去するため、ここでは扱わない。最後に案内される通り
+   `sudo shutdown -h now`で電源を切り、SDカードを取り出す。
 
 2. **SDカードをMacに挿し、イメージファイル化する**
 
+   イメージを配布・保管しやすいサイズにするため、ddでの単純コピーではなく、
+   [ApplePi-Baker](https://www.tweaking4all.com/software/macosx-software/applepi-baker-v2/)
+   （無料・Mac用）の「Backup」→「Shrink」を使うのがおすすめ。実使用量まで
+   パーティションを縮小してからバックアップしてくれるため、ファイルサイズがかなり
+   小さくなる（例: 32GBのSDカードでも実データが数GBなら、その程度のサイズに収まる）。
+   縮小したイメージは元のSDカードより小さい容量のカードにも書き込める。
+
    ```bash
+   # ApplePi-Baker が使えない場合の代替（パーティションは縮小されないため、
+   # 元のSDカードと同じ容量以上のカードにしか書き込めない点に注意）
    diskutil list                # SDカードのディスク番号を確認（例: /dev/disk4）
    sudo dd if=/dev/rdisk4 of=~/pophug-master.img bs=4m status=progress
+   gzip ~/pophug-master.img     # -> pophug-master.img.gz（サイズを抑える）
    ```
 
 3. **2台目以降は、このイメージをRaspberry Pi Imagerで書き込むだけ**
 
-   Raspberry Pi Imagerの「カスタムイメージを使う」から`pophug-master.img`を選んで書き込む。
-   OS側のホスト名・Wi-Fi等の詳細設定（Imagerの「編集」画面）は不要(起動後に機体側で
-   自動的に個別化・初期化されるため)。
+   Raspberry Pi Imagerの「カスタムイメージを使う」から作成したイメージ（`.img`・`.img.gz`
+   いずれも可）を選んで書き込む。OS側のホスト名・Wi-Fi等の詳細設定（Imagerの「編集」画面）
+   は不要(起動後に機体側で自動的に個別化・初期化されるため)。書き込み後は、実際に起動して
+   ホスト名の個別化・Wi-Fiセットアップモードが問題なく動くか一度確認しておくと安心。
 
    起動後、QRボタンの長押しでWi-Fiセットアップモードに入り、出店先のWi-Fiを設定すれば
    運用を開始できる。以降の機能追加・不具合修正は、アップロードページの「アップデート」から
@@ -394,6 +406,7 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
+| 4.20.0 | 量産マスターイメージ作成の準備スクリプトにイメージ縮小用クリーンアップを追加。README手順もApplePi-Baker(Shrink)を使う内容に更新 |
 | 4.19.0 | メイン設定画面のネットワーク欄で、外部Wi-Fi接続中は接続先のSSID名も表示するように変更 |
 | 4.18.0 | 写真アップロードQRのURLをIPアドレスからmDNSホスト名(.local)に変更し、再接続でIPが変わってもQRを出し直さずに済むように。Wi-Fi設定ページに通常画面へ戻るリンクを追加 |
 | 4.17.0 | スタンドアロンモードから既知のWi-Fiへ自動で戻らなかった問題に対応。Wi-Fi設定ページに「既知のWi-Fiへの再接続を試す」ボタンを追加（パスワード再入力不要） |
