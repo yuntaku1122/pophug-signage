@@ -17,7 +17,7 @@
 #   pophug-netctl retry-known
 #
 # インストール:
-#   sudo cp scripts/pophug-netctl /usr/local/bin/
+#   sudo cp pophug-netctl /usr/local/bin/
 #   sudo chmod 755 /usr/local/bin/pophug-netctl
 #   sudo chown root:root /usr/local/bin/pophug-netctl
 # ============================================
@@ -25,6 +25,7 @@
 import os
 import subprocess
 import sys
+import time
 
 HOTSPOT_CON_NAME = "pophug-setup-ap"
 
@@ -142,6 +143,19 @@ def _delete_connections_for_ssid(ssid):
             run(["nmcli", "connection", "delete", name])
 
 
+def _has_real_ip(device="wlan0"):
+    """指定デバイスに実際にIPv4アドレスが割り当てられているかを確認する。
+
+    nmcliが「接続成功(returncode 0)」と報告しても、実際にはDHCPでの
+    アドレス取得が失敗している/リンクローカルアドレスしか持てていない、
+    というケースがPi Zero 2Wの無線チップ(brcmfmac)で確認されているため、
+    接続成功の最終判定はnmcliの戻り値だけでなくこちらで行う。"""
+    r = run(["nmcli", "-g", "IP4.ADDRESS", "device", "show", device])
+    addr = r.stdout.strip().splitlines()[0] if r.stdout.strip() else ""
+    ip = addr.split("/")[0] if addr else ""
+    return bool(ip) and not ip.startswith("169.254.")  # リンクローカルは未接続扱い
+
+
 def cmd_connect(args):
     if len(args) != 2:
         sys.exit("usage: connect <ssid> <password>")
@@ -167,7 +181,20 @@ def cmd_connect(args):
             cmd += ["hidden", "yes"]
         if password:
             cmd += ["password", password]
-        return run(cmd, timeout=45)
+        r = run(cmd, timeout=25)
+        if r.returncode != 0:
+            return r
+
+        # nmcliが成功と報告した直後は、DHCPでのアドレス取得がまだ完了して
+        # いないことがあるため、少し待ちながら実際のIP取得を確認する
+        for _ in range(4):
+            if _has_real_ip():
+                return r
+            time.sleep(1.5)
+
+        r.returncode = 1
+        r.stderr = (r.stderr or "") + "\n(接続はできましたが、IPアドレスを取得できませんでした)"
+        return r
 
     r = try_connect(hidden=False)
     if r.returncode != 0:
@@ -176,6 +203,10 @@ def cmd_connect(args):
             # 通常のスキャンでは見つからなかった。非表示ネットワークの可能性が
             # あるので、積極的なプローブ接続で自動的に再試行する
             r = try_connect(hidden=True)
+        else:
+            # SSIDは見つかったがIP取得等で失敗した場合は、無線チップの一時的な
+            # 不調である可能性があるため、もう一度だけ同じ条件で再試行する
+            r = try_connect(hidden=False)
 
     if r.returncode != 0:
         # 失敗したらセットアップ用アクセスポイントに戻し、再試行できるようにする

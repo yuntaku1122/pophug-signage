@@ -57,7 +57,10 @@ def stop_hotspot():
     return _run_netctl(["hotspot-stop"])
 
 
-def connect(ssid, password, timeout=45):
+def connect(ssid, password, timeout=80):
+    # pophug-netctl側で「接続後の実IP取得確認」と「失敗時の自動再試行」を
+    # 行うようになった分、単純なnmcli呼び出しより時間がかかりうるため、
+    # タイムアウトを従来の45秒から余裕を持たせている。
     return _run_netctl(["connect", ssid, password], timeout=timeout)
 
 
