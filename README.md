@@ -17,11 +17,18 @@
 | `wifi_setup.py` | Wi-Fiセットアップモード関連（SSID自動生成、QRペイロード生成、netctl呼び出し） |
 | `update_check.py` | アップデート確認・適用（GitHub Releases連携、ファイル入れ替え、ロールバック） |
 | `sd_watchdog.py` | systemdのWatchdog機能向けの生存通知（フリーズ時の自動再起動用） |
-| `scripts/pophug-netctl` | root権限が必要なネットワーク操作だけを行う限定ヘルパー（要インストール、後述） |
-| `scripts/pophug-update-apply` | root権限が必要な更新の仕上げ（netctl・各種systemdユニット入れ替え、サービス再起動）だけを行う限定ヘルパー（要インストール、後述） |
+| `pophug-netctl` | root権限が必要なネットワーク操作だけを行う限定ヘルパー（要インストール、後述） |
+| `pophug-update-apply` | root権限が必要な更新の仕上げ（netctl・各種systemdユニット入れ替え、サービス再起動）だけを行う限定ヘルパー（要インストール、後述） |
 | `pophug-signage.service` | 本体（main.py）のsystemdユニット定義。OTAアップデートで自動配信される（後述） |
 | `version.py` | バージョン情報・変更履歴 |
 | `manual.py` | 取扱説明の内容（テキスト、ページ形式） |
+| `LICENSE` | ライセンス条項（PolyForm Noncommercial 1.0.0） |
+
+## ライセンス
+
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) の下で公開している。
+個人利用・研究・教育目的などの非商用利用は自由。商用利用（本製品と競合する製品の製造・販売を含む）
+には別途許諾が必要。詳細は`LICENSE`ファイルを参照。
 
 ## セットアップ
 
@@ -236,7 +243,7 @@ sudo visudo -c    # "parsed OK" と出れば設定完了
 配置し、それだけをsudoで許可する。
 
 ```bash
-sudo cp scripts/pophug-netctl /usr/local/bin/
+sudo cp pophug-netctl /usr/local/bin/
 sudo chmod 755 /usr/local/bin/pophug-netctl
 sudo chown root:root /usr/local/bin/pophug-netctl
 
@@ -284,7 +291,7 @@ git push origin v4.4.0
 ### インストール（Pi側で1回だけ必要）
 
 ```bash
-sudo cp scripts/pophug-update-apply /usr/local/bin/
+sudo cp pophug-update-apply /usr/local/bin/
 sudo chmod 755 /usr/local/bin/pophug-update-apply
 sudo chown root:root /usr/local/bin/pophug-update-apply
 
@@ -406,6 +413,7 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
+| 4.22.2 | LICENSEファイル(PolyForm Noncommercial 1.0.0)を追加。README内に残っていた誤ったパス表記も修正 |
 | 4.22.1 | pophug-hostname-setupで、初回起動時のホスト名変更直後にavahi-daemonを再起動し、その場で.local名が使えるように修正(従来は再起動しないと.localで繋がらないことがあった) |
 | 4.22.0 | 写真アップロードQR画面に、接続中Wi-Fi状況の表示とIPアドレス版QRを追加(mDNSが機能しない環境向けの保険) |
 | 4.21.0 | Wi-Fi接続処理で、nmcliが成功と報告してもIPアドレスを取得できていない場合は自動的に再試行するように変更(無線チップ特有の不安定さに対応) |
