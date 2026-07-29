@@ -276,6 +276,15 @@ def main():
         sys.exit("hostnamectl でのホスト名変更に失敗しました")
 
     update_etc_hosts(new_hostname)
+
+    # avahi-daemonは起動時に読み込んだホスト名でmDNS(.local)を配信し続け、
+    # 実行中にhostnamectlで変更しても自動では拾わないことがある
+    # （再起動すれば直るが、それだと初回のWi-Fi設定直後に「.localで繋がらない」
+    # という体験になってしまうため、ここで明示的に再起動して即座に反映させる）。
+    r = subprocess.run(["systemctl", "restart", "avahi-daemon"])
+    if r.returncode != 0:
+        print("avahi-daemonの再起動に失敗しました（次回起動時には解消されます）。")
+
     print(f"ホスト名を {new_hostname} に変更しました（MAC: {mac}）")
     print("初期化が完了しました。")
 

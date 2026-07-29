@@ -112,6 +112,10 @@ class PopSignage:
         self.qr_label_surface = None
         self.qr_url_surface = None
         self.qr_url = ""
+        self.qr_status_surface = None    # 接続中のSSID/IPの表示用
+        self.qr_ip_surface = None        # IPアドレス版QR（.localが引けない環境向けの保険）
+        self.qr_ip_label_surface = None
+        self.qr_ip_url_surface = None
         self._qr_pause_start = None   # QR表示開始時刻（スライドショー一時停止分の巻き戻しに使う）
 
         self.manual_active = False    # ボタン長押しで手動表示中かどうか
@@ -501,42 +505,80 @@ class PopSignage:
         self.qr_active = False
 
     def show_qr_code(self):
-        """アップロードページのURLをQRコードとして生成し、画面に一定時間オーバーレイ表示する"""
+        """アップロードページのURLをQRコードとして生成し、画面に一定時間オーバーレイ表示する。
+
+        mDNS(.local)は、ルーターによっては正しく機能せず名前解決に失敗することがある
+        （現場での実運用で確認済み）。ホスト名版のQRだけでなく、その場でIPアドレス版の
+        QRも一緒に表示することで、どちらかで必ずアクセスできるようにする。"""
         if qrcode is None:
             log("qrcodeライブラリが未インストールのためQR表示できません（pip install qrcode[pil]）")
             return
 
-        # IPアドレスは接続先Wi-Fiが変わる・DHCPで再割り当てされるたびに変化し、
-        # その都度QRを表示し直す必要があった。mDNS(.local)ホスト名なら、SSH接続
-        # (README参照)と同じ仕組みでアドレスが変わっても同じURLで開けるため、
-        # 明示的な上書き(UPLOAD_URL_OVERRIDE)が無い場合はこちらを優先する。
-        url = UPLOAD_URL_OVERRIDE or f"http://{socket.gethostname()}.local:{UPLOAD_PORT}"
-        try:
-            qr = qrcode.QRCode(box_size=8, border=2)
-            qr.add_data(url)
-            qr.make(fit=True)
-            qr_img = qr.make_image(fill_color="black", back_color="white")
-            buf = io.BytesIO()
-            qr_img.save(buf, format="PNG")
-            buf.seek(0)
-            surface = pygame.image.load(buf)
+        # IPアドレスは接続先Wi-Fiが変わる・DHCPで再割り当てされるたびに変化するため、
+        # mDNS(.local)ホスト名を主として案内する（明示的な上書き指定があればそちらを優先）。
+        hostname_url = UPLOAD_URL_OVERRIDE or f"http://{socket.gethostname()}.local:{UPLOAD_PORT}"
+        local_ip = self._get_local_ip()
+        # UPLOAD_URL_OVERRIDEで固定運用している場合や、そもそもIPが取得できていない
+        # (オフライン)場合は、IPアドレス版QRを出しても意味が無いので省略する
+        ip_url = None
+        if not UPLOAD_URL_OVERRIDE and local_ip and local_ip != "127.0.0.1":
+            ip_url = f"http://{local_ip}:{UPLOAD_PORT}"
 
-            # QR本体は画面の短辺の45%程度に収め、下のラベル・URL文字列も
-            # 必ず表示できるよう余白を確保する
-            size = int(min(self.canvas.get_width(), self.canvas.get_height()) * 0.45)
-            surface = pygame.transform.scale(surface, (size, size))
+        try:
+            def make_qr_surface(url, box_size):
+                qr = qrcode.QRCode(box_size=box_size, border=2)
+                qr.add_data(url)
+                qr.make(fit=True)
+                qr_img = qr.make_image(fill_color="black", back_color="white")
+                buf = io.BytesIO()
+                qr_img.save(buf, format="PNG")
+                buf.seek(0)
+                return pygame.image.load(buf)
 
             max_text_width = self.canvas.get_width() - 48
-            self.qr_surface = surface
-            self.qr_url = url
+            short_side = min(self.canvas.get_width(), self.canvas.get_height())
+
+            # QR2つ分を表示する場合は、メインの方を少し小さめにして余白を確保する
+            primary_ratio = 0.45 if ip_url is None else 0.38
+            primary_size = int(short_side * primary_ratio)
+            self.qr_surface = pygame.transform.scale(make_qr_surface(hostname_url, 8), (primary_size, primary_size))
+            self.qr_url = hostname_url
             self.qr_label_surface = self._render_fit_text(
                 "写真アップロードはこちら", max_text_width, start_size=32, min_size=16)
             self.qr_url_surface = self._render_fit_text(
-                url, max_text_width, start_size=22, min_size=12, color=(210, 210, 210))
+                hostname_url, max_text_width, start_size=22, min_size=12, color=(210, 210, 210))
+
+            # 接続中のWi-Fi状況（分かる範囲で）。ホスト名で開けなかった時に、
+            # 手動でIPアドレスを入力する際の手がかりにもなる
+            conn = wifi_setup.current_connection_info()
+            if conn:
+                status_text = f"接続中: {conn['ssid']}（{conn['ip']}）"
+            elif ip_url:
+                status_text = f"IPアドレス: {local_ip}"
+            else:
+                status_text = "ネットワーク状態を取得できませんでした"
+            self.qr_status_surface = self._render_fit_text(
+                status_text, max_text_width, start_size=18, min_size=12, color=(160, 205, 160))
+
+            if ip_url:
+                secondary_size = int(short_side * 0.22)
+                self.qr_ip_surface = pygame.transform.scale(make_qr_surface(ip_url, 6), (secondary_size, secondary_size))
+                self.qr_ip_label_surface = self._render_fit_text(
+                    "つながらない場合はこちら（IPアドレス版）", max_text_width, start_size=18, min_size=12,
+                    color=(200, 200, 200))
+                self.qr_ip_url_surface = self._render_fit_text(
+                    ip_url, max_text_width, start_size=18, min_size=11, color=(180, 180, 180))
+            else:
+                self.qr_ip_surface = None
+                self.qr_ip_label_surface = None
+                self.qr_ip_url_surface = None
+
             self.qr_active = True
             self.qr_hide_time = time.time() + QR_DISPLAY_SECONDS
             self._qr_pause_start = time.time()  # スライドショー一時停止の起点を記録
-            log(f"QRコード表示: {url}（スライドショーを一時停止）")
+            log(f"QRコード表示: {hostname_url}"
+                + (f" / IP版: {ip_url}" if ip_url else "")
+                + "（スライドショーを一時停止）")
         except Exception as e:
             log(f"QRコード生成エラー: {e}")
 
@@ -569,24 +611,53 @@ class PopSignage:
         qr = self.qr_surface
         label = self.qr_label_surface
         url_s = self.qr_url_surface
+        status_s = self.qr_status_surface
+        ip_qr = self.qr_ip_surface
+        ip_label = self.qr_ip_label_surface
+        ip_url_s = self.qr_ip_url_surface
 
-        gap = 18
-        total_h = qr.get_height() + gap + label.get_height() + 10 + url_s.get_height()
-        top = max(20, h // 2 - total_h // 2)
+        gap = 14
+        total_h = qr.get_height() + gap + label.get_height() + 8 + url_s.get_height()
+        if status_s:
+            total_h += status_s.get_height() + gap
+        if ip_qr:
+            total_h += gap + 14 + ip_label.get_height() + 8 + ip_qr.get_height() + 8 + ip_url_s.get_height()
+
+        y = max(16, h // 2 - total_h // 2)
+
+        if status_s:
+            self.canvas.blit(status_s, (w // 2 - status_s.get_width() // 2, y))
+            y += status_s.get_height() + gap
 
         qr_x = w // 2 - qr.get_width() // 2
-        qr_y = top
-
         white_bg = pygame.Surface((qr.get_width() + 24, qr.get_height() + 24))
         white_bg.fill((255, 255, 255))
-        self.canvas.blit(white_bg, (qr_x - 12, qr_y - 12))
-        self.canvas.blit(qr, (qr_x, qr_y))
+        self.canvas.blit(white_bg, (qr_x - 12, y - 12))
+        self.canvas.blit(qr, (qr_x, y))
+        y += qr.get_height() + gap
 
-        label_y = qr_y + qr.get_height() + gap
-        self.canvas.blit(label, (w // 2 - label.get_width() // 2, label_y))
+        self.canvas.blit(label, (w // 2 - label.get_width() // 2, y))
+        y += label.get_height() + 8
 
-        url_y = label_y + label.get_height() + 10
-        self.canvas.blit(url_s, (w // 2 - url_s.get_width() // 2, url_y))
+        self.canvas.blit(url_s, (w // 2 - url_s.get_width() // 2, y))
+        y += url_s.get_height()
+
+        if ip_qr:
+            y += gap
+            pygame.draw.line(self.canvas, (90, 90, 90), (w // 2 - 60, y), (w // 2 + 60, y), 1)
+            y += 14
+
+            self.canvas.blit(ip_label, (w // 2 - ip_label.get_width() // 2, y))
+            y += ip_label.get_height() + 8
+
+            ip_qr_x = w // 2 - ip_qr.get_width() // 2
+            white_bg2 = pygame.Surface((ip_qr.get_width() + 16, ip_qr.get_height() + 16))
+            white_bg2.fill((255, 255, 255))
+            self.canvas.blit(white_bg2, (ip_qr_x - 8, y - 8))
+            self.canvas.blit(ip_qr, (ip_qr_x, y))
+            y += ip_qr.get_height() + 8
+
+            self.canvas.blit(ip_url_s, (w // 2 - ip_url_s.get_width() // 2, y))
 
         self._draw_version_watermark()
 
