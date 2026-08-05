@@ -76,6 +76,86 @@ def hidden_mtime(image_folder):
         return None
 
 
+# ---------------- 固定表示（USB取り込みの入れ替え対象から除外する画像） ----------------
+# アップロードページで「固定表示」に設定した画像のファイル名を
+# images/.pinned.json に保存する。USB取り込み機能は、取り込み完了時に
+# 「今回取り込んだ画像」と「固定表示に設定されている画像」以外を自動的に
+# 非表示化するため、店のロゴ等の常時表示したい画像はここに登録しておく。
+# ただし固定表示はあくまでUSB取り込みの自動非表示化から保護するだけの
+# フラグであり、アップロードページの表示/非表示スイッチによる手動操作は
+# 固定表示より常に優先される（手動で非表示にすれば固定表示でも隠れる）。
+
+def _pinned_path(image_folder):
+    return os.path.join(image_folder, ".pinned.json")
+
+
+def load_pinned(image_folder):
+    """固定表示に設定されているファイル名の集合を返す"""
+    path = _pinned_path(image_folder)
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def save_pinned(image_folder, pinned_set):
+    path = _pinned_path(image_folder)
+    with _lock:
+        _atomic_write_json(path, sorted(pinned_set))
+
+
+def toggle_pinned(image_folder, filename):
+    """指定ファイルの固定表示/通常を反転させ、保存後の集合を返す"""
+    pinned = load_pinned(image_folder)
+    if filename in pinned:
+        pinned.discard(filename)
+    else:
+        pinned.add(filename)
+    save_pinned(image_folder, pinned)
+    return pinned
+
+
+def pinned_mtime(image_folder):
+    """固定表示状態ファイルの更新時刻だけを返す（存在しなければNone）"""
+    path = _pinned_path(image_folder)
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+# ---------------- USB取り込み履歴（重複取り込み防止） ----------------
+# USBメモリーから取り込み済みの画像を、内容のハッシュ値をキーに
+# images/.usb_imported.json に {ハッシュ値: 保存後のファイル名} の形で記録する。
+# 同じUSBメモリーを何度も抜き差ししても、同一内容のファイルを重複してコピーしない
+# ようにするための仕組み（pophug-usb-importから利用する）。
+
+def _usb_imported_path(image_folder):
+    return os.path.join(image_folder, ".usb_imported.json")
+
+
+def load_usb_imported(image_folder):
+    """{ハッシュ値: 保存後のファイル名} の辞書を返す"""
+    path = _usb_imported_path(image_folder)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_usb_imported(image_folder, imported_map):
+    path = _usb_imported_path(image_folder)
+    with _lock:
+        _atomic_write_json(path, imported_map)
+
+
 # ---------------- 表示設定（トランジション時間など） ----------------
 # アップロードページから変更した設定を images/.settings.json に保存する。
 # main.py側は定期的にこのファイルを読み直し、実行中の設定を上書きする。

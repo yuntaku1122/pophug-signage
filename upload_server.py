@@ -141,6 +141,8 @@ UPLOAD_PAGE = """
                       border-radius:6px; font-size:12px; background:#fff; }
   .priority-badge { position:absolute; top:8px; left:8px; background:#e67e22; color:#fff;
                      font-size:11px; padding:3px 8px; border-radius:10px; }
+  .pin-badge { position:absolute; top:8px; right:8px; background:#3a6b8a; color:#fff;
+                font-size:11px; padding:3px 8px; border-radius:10px; }
   .setting-row { margin-top:16px; }
   .setting-row label { font-size:14px; color:#333; display:flex; justify-content:space-between; }
   .setting-row input[type=range] { width:100%; margin:10px 0 4px; accent-color:#228b22; }
@@ -255,6 +257,46 @@ UPLOAD_PAGE = """
           item.classList.toggle('is-hidden', data.hidden);
           label.textContent = data.hidden ? '非表示中' : '表示中';
           label.classList.remove('is-updating');
+        })
+        .catch(function () {
+          // 通信失敗時はスイッチを元の状態に戻す
+          cb.checked = !wasChecked;
+          label.textContent = '更新に失敗しました';
+          label.classList.remove('is-updating');
+        });
+    });
+  });
+
+  document.querySelectorAll('.pin-cb').forEach(function (cb) {
+    cb.addEventListener('change', function () {
+      var filename = this.dataset.filename;
+      var item = document.getElementById('item-' + filename);
+      var label = item.querySelector('.pin-switch-label');
+      var wasChecked = this.checked;
+      label.textContent = '更新中...';
+      label.classList.add('is-updating');
+
+      fetch('/toggle-pinned', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'filename=' + encodeURIComponent(filename)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          label.textContent = data.pinned ? '固定表示中' : '固定表示ではない';
+          label.classList.remove('is-updating');
+          var existingBadge = item.querySelector('.pin-badge');
+          if (data.pinned && !existingBadge) {
+            var badge = document.createElement('span');
+            badge.className = 'pin-badge';
+            badge.textContent = '📌固定';
+            item.insertBefore(badge, item.querySelector('.switch-row'));
+          } else if (!data.pinned && existingBadge) {
+            existingBadge.remove();
+          }
         })
         .catch(function () {
           // 通信失敗時はスイッチを元の状態に戻す
@@ -627,7 +669,7 @@ PRIORITY_LABELS = {
 }
 
 
-def render_gallery_item(filename, is_hidden, priority_tag):
+def render_gallery_item(filename, is_hidden, priority_tag, is_pinned=False):
     state_class = "is-hidden" if is_hidden else ""
     checked_attr = "" if is_hidden else "checked"
     label_text = "非表示中" if is_hidden else "表示中"
@@ -636,19 +678,30 @@ def render_gallery_item(filename, is_hidden, priority_tag):
         f'<option value="{value}"{" selected" if value == current_tag else ""}>{label}</option>'
         for value, label in PRIORITY_LABELS.items()
     )
-    badge = ""
+    priority_badge = ""
     if current_tag != "normal":
-        badge = f'<span class="priority-badge">{PRIORITY_LABELS[current_tag]}</span>'
+        priority_badge = f'<span class="priority-badge">{PRIORITY_LABELS[current_tag]}</span>'
+    pin_checked_attr = "checked" if is_pinned else ""
+    pin_label_text = "固定表示中" if is_pinned else "固定表示ではない"
+    pin_badge = '<span class="pin-badge">📌固定</span>' if is_pinned else ""
     return f"""
     <div class="item {state_class}" id="item-{filename}">
       <img src="/img/{filename}" loading="lazy">
-      {badge}
+      {priority_badge}
+      {pin_badge}
       <div class="switch-row">
         <label class="switch">
           <input type="checkbox" class="toggle-cb" data-filename="{filename}" {checked_attr}>
           <span class="slider"></span>
         </label>
         <span class="switch-label">{label_text}</span>
+      </div>
+      <div class="switch-row">
+        <label class="switch">
+          <input type="checkbox" class="pin-cb" data-filename="{filename}" {pin_checked_attr}>
+          <span class="slider"></span>
+        </label>
+        <span class="pin-switch-label switch-label">{pin_label_text}</span>
       </div>
       <select class="priority-select" data-filename="{filename}" data-current-tag="{current_tag}">
         {options}
@@ -960,9 +1013,10 @@ def create_app(image_folder):
         files = list_images()
         hidden = signage_state.load_hidden(image_folder)
         priority_map = signage_state.load_priority(image_folder)
+        pinned = signage_state.load_pinned(image_folder)
         visible_count = len([f for f in files if f not in hidden])
         gallery_html = "".join(
-            render_gallery_item(f, f in hidden, priority_map.get(f, "normal"))
+            render_gallery_item(f, f in hidden, priority_map.get(f, "normal"), f in pinned)
             for f in reversed(files)
         )
 
@@ -1021,6 +1075,19 @@ def create_app(image_folder):
 
         return redirect("/")
 
+    @app.route("/toggle-pinned", methods=["POST"])
+    def toggle_pinned():
+        filename = request.form.get("filename")
+        is_pinned = False
+        if filename:
+            pinned_set = signage_state.toggle_pinned(image_folder, filename)
+            is_pinned = filename in pinned_set
+
+        if request.headers.get("Accept") == "application/json":
+            return {"filename": filename, "pinned": is_pinned}, 200
+
+        return redirect("/")
+
     @app.route("/delete", methods=["POST"])
     def delete():
         filename = request.form.get("filename", "")
@@ -1044,11 +1111,15 @@ def create_app(image_folder):
             return {"error": "file not found"}, 404
 
         os.remove(path)
-        # 非表示リストに載っていれば、そちらからも削除しておく
+        # 非表示リスト・固定表示リストに載っていれば、そちらからも削除しておく
         hidden_set = signage_state.load_hidden(image_folder)
         if safe_name in hidden_set:
             hidden_set.discard(safe_name)
             signage_state.save_hidden(image_folder, hidden_set)
+        pinned_set = signage_state.load_pinned(image_folder)
+        if safe_name in pinned_set:
+            pinned_set.discard(safe_name)
+            signage_state.save_pinned(image_folder, pinned_set)
 
         print(f"[delete] 画像を削除しました: {safe_name}")
 
@@ -1070,7 +1141,7 @@ def create_app(image_folder):
         if not os.path.isfile(path):
             return {"error": "file not found"}, 404
 
-        if tag not in ("normal", "priority1", "priority2"):
+        if tag not in ("normal", "priority1", "priority2", "priority3", "priority4", "priority5"):
             return {"error": "invalid tag"}, 400
 
         signage_state.set_priority_tag(image_folder, safe_name, tag)

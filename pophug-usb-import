@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+# ============================================
+# pophug-usb-import
+#
+# USBメモリー挿入時に自動実行される、root権限が必要な画像取り込み処理。
+# udevルール(99-pophug-usb.rules)経由で、systemdテンプレートユニット
+# (pophug-usb-import@.service)としてroot権限で起動される。
+# ネットワーク経由の入力は一切受け付けず、起動元はカーネルのudevイベントのみ
+# （pophug-netctl等のようにWebサーバーからsudo経由で呼ばれるものではない）。
+#
+# 処理の流れ:
+#   1. 対象パーティションを読み取り専用でマウント（USB側は一切変更しない）
+#   2. トップレベル（サブフォルダは対象外）の画像ファイルだけを走査
+#   3. 内容のハッシュ値で重複チェックし、未取込のものだけ
+#      images/usb_YYYYMMDD_HHMMSS_連番.拡張子 としてコピー
+#   4. ファイル名が「fixed_」で始まるものは「固定表示」として登録
+#      （images/.pinned.json。優先表示等と同じくWeb設定画面からも切替可能）
+#   5. 今回取り込んだ画像・固定表示画像 以外の既存画像を一括で非表示化
+#      （＝USB取り込み後は、そのUSBの内容＋固定表示画像だけが表示される）
+#   6. 本体画面に完了通知（images/.notice.json）を出し、アンマウント
+#
+# 使い方:
+#   pophug-usb-import <デバイス名 例: sda1>
+#
+# インストール:
+#   sudo cp pophug-usb-import /usr/local/bin/
+#   sudo chmod 755 /usr/local/bin/pophug-usb-import
+#   sudo chown root:root /usr/local/bin/pophug-usb-import
+#   sudo cp pophug-usb-import@.service /etc/systemd/system/
+#   sudo cp 99-pophug-usb.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo systemctl daemon-reload
+#   sudo apt-get install -y exfatprogs   # exFAT対応に必要（FAT32のみなら不要）
+# ============================================
+
+import fcntl
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+# main.py・upload_server.pyと同じ画像フォルダ（pophug-signage.serviceの
+# WorkingDirectoryを基準とした ./images と同一パスになるよう固定で指定する。
+# このスクリプトはリポジトリ外(/usr/local/bin)に配置されるため相対パスに
+# できない）。ユーザー名やインストール先を変えた場合はここも合わせて変更すること。
+REPO_DIR = "/home/pophug/pophug-signage"
+IMAGE_FOLDER = os.path.join(REPO_DIR, "images")
+
+MOUNT_POINT = "/media/pophug-usb"
+POPHUG_USER = "pophug"
+POPHUG_GROUP = "pophug"
+FIXED_PREFIX = "fixed_"
+SUPPORTED_EXT = (".jpg", ".jpeg", ".png")
+DEVICE_RE = re.compile(r"^sd[a-z][0-9]+$")
+LOCK_PATH = "/tmp/pophug-usb-import.lock"
+
+# signage_state.py（標準ライブラリのみに依存）をアプリ本体のディレクトリから
+# 直接importする。atomic書き込みや各状態ファイルの読み書きロジックを
+# ここで再実装せず、既存の唯一の実装をそのまま再利用するため。
+sys.path.insert(0, REPO_DIR)
+try:
+    import signage_state
+except ImportError:
+    signage_state = None  # インストール直後などrepo未配置の場合は後段でエラー終了する
+
+
+STATE_FILENAMES = (
+    ".hidden.json", ".pinned.json", ".priority.json",
+    ".settings.json", ".notice.json", ".usb_imported.json",
+)
+
+
+def log(message):
+    print(f"[usb-import] {message}", flush=True)
+
+
+def run(cmd, timeout=30):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        class _R:
+            returncode = 1
+            stdout = ""
+            stderr = "timeout"
+        return _R()
+
+
+def fix_ownership(image_folder):
+    """root権限で書き込んだ状態ファイル・画像ファイルの所有者を、
+    通常運用時にFlask(pophug-signage.service)を動かしているpophugユーザーへ
+    戻す。tempfile.mkstemp()はデフォルトでmode 0600・作成者(root)所有の
+    ファイルを作るため、これを戻さないと以後pophugユーザーが読み書きできず
+    アプリ全体が壊れてしまう。存在しないファイルはスキップする。
+    pophugユーザーが存在しない/権限が無い環境（開発機でのテスト等）でも
+    処理全体を止めないよう、失敗はログに残すだけで継続する。"""
+    targets = [os.path.join(image_folder, name) for name in STATE_FILENAMES]
+    try:
+        if os.path.isdir(image_folder):
+            targets += [
+                os.path.join(image_folder, f) for f in os.listdir(image_folder)
+                if os.path.splitext(f)[1].lower() in SUPPORTED_EXT
+            ]
+    except OSError:
+        pass
+
+    for path in targets:
+        if not os.path.exists(path):
+            continue
+        try:
+            shutil.chown(path, user=POPHUG_USER, group=POPHUG_GROUP)
+            os.chmod(path, 0o644)
+        except (LookupError, PermissionError, OSError) as e:
+            log(f"所有者の復元に失敗しました（無視して続行）: {path}: {e}")
+
+
+def detect_fs_type(device_path):
+    r = run(["blkid", "-o", "value", "-s", "TYPE", device_path])
+    return r.stdout.strip()
+
+
+def mount_readonly(device_path):
+    """指定デバイスを読み取り専用でマウントする。USB側の内容は一切変更しない。
+    戻り値: (成功したか, エラーメッセージ or None)"""
+    fs_type = detect_fs_type(device_path)
+    mount_type = {"vfat": "vfat", "exfat": "exfat"}.get(fs_type)
+    if mount_type is None:
+        return False, f"未対応のファイルシステムです（{fs_type or '不明'}）。FAT32/exFATのみ対応しています"
+
+    os.makedirs(MOUNT_POINT, exist_ok=True)
+    r = run(["mount", "-t", mount_type, "-o", "ro", device_path, MOUNT_POINT], timeout=15)
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout or "マウントに失敗しました").strip()
+    return True, None
+
+
+def unmount():
+    run(["umount", MOUNT_POINT], timeout=15)
+
+
+def file_hash(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def import_images(source_dir, image_folder, ts=None):
+    """マウント済み(または単体テスト用に用意した通常の)ディレクトリsource_dirの
+    トップレベルにある画像を、image_folderへ取り込む中核ロジック。
+
+    実際のUSBデバイスのマウント/アンマウント処理とは独立させてあり、
+    USB無しでも（source_dirを普通のディレクトリに差し替えれば）検証できる。
+
+    戻り値: dict {
+        "imported": [...新規に取り込んだファイル名...],
+        "pinned": [...うち固定表示に設定したファイル名...],
+        "skipped_duplicate": 重複でスキップした件数,
+        "error": エラーメッセージ or None,
+    }
+    """
+    if signage_state is None:
+        return {"imported": [], "pinned": [], "skipped_duplicate": 0,
+                "error": "signage_state.pyが見つかりません（インストール先を確認してください）"}
+
+    os.makedirs(image_folder, exist_ok=True)
+
+    try:
+        entries = sorted(os.listdir(source_dir))
+    except OSError as e:
+        return {"imported": [], "pinned": [], "skipped_duplicate": 0,
+                "error": f"USBメモリーの読み込みに失敗しました（{e}）"}
+
+    # サブフォルダは対象外。トップレベルの対応拡張子ファイルのみを候補にする
+    candidates = []
+    for name in entries:
+        full = os.path.join(source_dir, name)
+        if not os.path.isfile(full):
+            continue
+        ext = os.path.splitext(name)[1].lower()
+        if ext in SUPPORTED_EXT:
+            candidates.append((name, full, ext))
+
+    if not candidates:
+        return {"imported": [], "pinned": [], "skipped_duplicate": 0,
+                "error": "USBメモリーに取り込める画像が見つかりませんでした"}
+
+    imported_hashes = signage_state.load_usb_imported(image_folder)
+    hidden = signage_state.load_hidden(image_folder)
+    pinned = signage_state.load_pinned(image_folder)
+
+    existing_before = set(
+        f for f in os.listdir(image_folder)
+        if os.path.splitext(f)[1].lower() in SUPPORTED_EXT
+    )
+
+    ts = ts or time.strftime("%Y%m%d_%H%M%S")
+    new_filenames = []
+    new_pinned = []
+    skipped_duplicate = 0
+    index = 1
+
+    for name, full, ext in candidates:
+        try:
+            h = file_hash(full)
+        except OSError as e:
+            log(f"{name} の読み込みに失敗しました（スキップ）: {e}")
+            continue
+
+        if h in imported_hashes:
+            skipped_duplicate += 1
+            continue
+
+        is_pinned = name.lower().startswith(FIXED_PREFIX)
+        dest_name = f"usb_{ts}_{index:03d}{ext}"
+        while os.path.exists(os.path.join(image_folder, dest_name)):
+            index += 1
+            dest_name = f"usb_{ts}_{index:03d}{ext}"
+        index += 1
+        dest_path = os.path.join(image_folder, dest_name)
+
+        try:
+            shutil.copyfile(full, dest_path)
+        except OSError as e:
+            log(f"{name} のコピーに失敗しました（スキップ）: {e}")
+            continue
+
+        imported_hashes[h] = dest_name
+        new_filenames.append(dest_name)
+        if is_pinned:
+            new_pinned.append(dest_name)
+            pinned.add(dest_name)
+
+    if not new_filenames:
+        msg = ("USBメモリー内の画像はすべて取り込み済みでした" if skipped_duplicate
+               else "取り込める画像がありませんでした")
+        return {"imported": [], "pinned": [], "skipped_duplicate": skipped_duplicate, "error": msg}
+
+    # 今回取り込んだ画像・固定表示画像 以外の既存画像を一括で非表示化する
+    # （削除はしない＝Web画面のギャラリーには残り、後で手動で表示に戻せる）
+    for f in existing_before:
+        if f in new_filenames or f in pinned:
+            continue
+        hidden.add(f)
+    for f in new_filenames:
+        hidden.discard(f)
+
+    signage_state.save_hidden(image_folder, hidden)
+    signage_state.save_pinned(image_folder, pinned)
+    signage_state.save_usb_imported(image_folder, imported_hashes)
+
+    return {
+        "imported": new_filenames,
+        "pinned": new_pinned,
+        "skipped_duplicate": skipped_duplicate,
+        "error": None,
+    }
+
+
+def build_notice_message(result):
+    if result["error"] and not result["imported"]:
+        return result["error"]
+
+    msg = f"USBから画像を{len(result['imported'])}枚取り込みました"
+    if result["pinned"]:
+        msg += f"（うち固定表示{len(result['pinned'])}枚）"
+    msg += "。以前の画像は非表示になりました。USBを取り外してください"
+    if result["skipped_duplicate"]:
+        msg += f"（取り込み済みの{result['skipped_duplicate']}枚はスキップしました）"
+    return msg
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: pophug-usb-import <device name e.g. sda1>")
+
+    device_name = sys.argv[1]
+    if not DEVICE_RE.match(device_name):
+        sys.exit(f"invalid device name: {device_name}")
+
+    device_path = f"/dev/{device_name}"
+    if not os.path.exists(device_path):
+        sys.exit(f"device not found: {device_path}")
+
+    if signage_state is None:
+        sys.exit(f"signage_state.py not found under {REPO_DIR}")
+
+    # 複数のUSBパーティションがほぼ同時に挿入された場合の競合を避けるため、
+    # 状態ファイル(.hidden.json等)を触る一連の処理を直列化する
+    lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        ok, err = mount_readonly(device_path)
+        if not ok:
+            log(f"マウント失敗: {err}")
+            signage_state.save_notice(IMAGE_FOLDER, f"USBメモリーを読み込めませんでした（{err}）")
+            fix_ownership(IMAGE_FOLDER)
+            return
+
+        try:
+            result = import_images(MOUNT_POINT, IMAGE_FOLDER)
+        finally:
+            unmount()
+
+        message = build_notice_message(result)
+        signage_state.save_notice(IMAGE_FOLDER, message)
+        fix_ownership(IMAGE_FOLDER)
+        log(message)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+if __name__ == "__main__":
+    main()
