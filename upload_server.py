@@ -693,6 +693,10 @@ WIFI_SETUP_PAGE = """
   button { width:100%; padding:14px; background:#228b22; color:#fff; border:none;
            border-radius:8px; font-size:16px; margin-top:8px; }
   .status { font-size:13px; color:#666; min-height:18px; margin-top:10px; }
+  .status-success {
+    font-size:14px; font-weight:bold; color:#1a6b1a; background:#e8f7e8;
+    border:1px solid #8fd08f; border-radius:6px; padding:8px 12px; margin-top:10px;
+  }
   .hint { font-size:12px; color:#888; }
   .show-password-checkbox { display:flex; align-items:center; gap:8px; font-size:13px; color:#555; margin:4px 0; }
   .show-password-checkbox input { width:auto; margin:0; }
@@ -895,13 +899,16 @@ WIFI_SETUP_PAGE = """
           .then(function (r) { return r.json(); })
           .then(function (data) {
             if (data.status === 'ok') {
-              status.textContent = '削除しました（' + data.count + '件）。今の接続が切れた場合は、この本体のセットアップ用Wi-Fiに繋ぎ直してください。';
+              status.className = 'status-success';
+              status.textContent = '✔ 保存済みのWi-Fi情報を削除しました（' + data.count + '件）。サイネージの画面にも表示されます。今の接続が切れた場合は、この本体のセットアップ用Wi-Fiに繋ぎ直してください。';
             } else {
+              status.className = 'status';
               status.textContent = '削除に失敗しました: ' + (data.error || '不明なエラー');
               forgetBtn.disabled = false;
             }
           })
           .catch(function () {
+            status.className = 'status';
             status.textContent = '応答がありません。今の接続が切れた可能性があります（削除自体は完了している可能性が高いです）。';
           });
       });
@@ -1299,6 +1306,7 @@ def create_app(image_folder):
             m = re.search(r"deleted:(\d+)", out or "")
             count = int(m.group(1)) if m else 0
             print(f"[wifi] 保存済みWi-Fi情報を削除しました（{count}件）")
+            signage_state.save_notice(image_folder, f"保存済みのWi-Fi情報を削除しました（{count}件）")
             return {"status": "ok", "count": count}
         error_message = err or out or "不明なエラー"
         print(f"[wifi] 保存済みWi-Fi情報の削除に失敗: {error_message}")

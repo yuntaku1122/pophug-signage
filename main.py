@@ -15,7 +15,8 @@ import socket
 import threading
 from datetime import datetime
 from config import *
-from signage_state import load_hidden, hidden_mtime, load_settings, settings_mtime, load_priority, PRIORITY_TAGS
+from signage_state import (load_hidden, hidden_mtime, load_settings, settings_mtime,
+                            load_priority, PRIORITY_TAGS, load_notice, notice_mtime)
 from version import __version__
 import wifi_setup
 import sd_watchdog
@@ -105,6 +106,14 @@ class PopSignage:
         # Web側で変更されたトランジション時間・画面回転などの設定を読み込んで反映
         self.last_settings_mtime = settings_mtime(IMAGE_FOLDER)
         self._apply_settings()
+
+        # Web側の操作結果をサイネージ画面に一時表示するための状態。
+        # 起動時点で既にファイルが存在していても、それは前回までの古い通知なので
+        # 表示はせず、あくまで「起動後に新しく書き込まれた」ものだけを表示する。
+        self.last_notice_mtime = notice_mtime(IMAGE_FOLDER)
+        self.notice_text = None
+        self.notice_hide_time = 0
+        self.notice_surface = None
 
         self.qr_active = False        # QRコードオーバーレイの表示中フラグ
         self.qr_hide_time = 0
@@ -503,6 +512,33 @@ class PopSignage:
                 self.transition_start_time += paused
             self._qr_pause_start = None
         self.qr_active = False
+
+    def _show_notice(self, message):
+        """Web側の操作結果を、サイネージ画面上部に数秒間バナー表示する。
+        スライドショー自体は止めない（QRのように操作を待つものではなく、
+        あくまで「今こういう操作がありました」という控えめな通知のため）。"""
+        max_width = self.canvas.get_width() - 64
+        self.notice_surface = self._render_fit_text(
+            message, max_width, start_size=22, min_size=13, color=(255, 255, 255))
+        self.notice_hide_time = time.time() + NOTICE_DISPLAY_SECONDS
+        log(f"サイネージ画面に通知を表示: {message}")
+
+    def draw_notice_overlay(self):
+        if time.time() >= self.notice_hide_time or self.notice_surface is None:
+            return
+        w = self.canvas.get_width()
+        surf = self.notice_surface
+        pad_x, pad_y = 20, 12
+        box_w = surf.get_width() + pad_x * 2
+        box_h = surf.get_height() + pad_y * 2
+        box_x = w // 2 - box_w // 2
+        box_y = 16
+
+        box = pygame.Surface((box_w, box_h))
+        box.set_alpha(225)
+        box.fill((34, 139, 34))
+        self.canvas.blit(box, (box_x, box_y))
+        self.canvas.blit(surf, (box_x + pad_x, box_y + pad_y))
 
     def show_qr_code(self):
         """アップロードページのURLをQRコードとして生成し、画面に一定時間オーバーレイ表示する。
@@ -1066,6 +1102,13 @@ class PopSignage:
                         # 同様に、設定変更が行われた=スマホ操作が始まっている合図としてQRを消す
                         self._hide_qr()
 
+                    current_notice_mtime = notice_mtime(IMAGE_FOLDER)
+                    if current_notice_mtime != self.last_notice_mtime:
+                        self.last_notice_mtime = current_notice_mtime
+                        notice = load_notice(IMAGE_FOLDER)
+                        if notice and notice.get("message"):
+                            self._show_notice(notice["message"])
+
                 if now - self.last_scan_time >= RESCAN_INTERVAL:
                     self.last_scan_time = now
                     self.load_pop_images()
@@ -1107,6 +1150,7 @@ class PopSignage:
                     self.draw_pop_mode()
                     if self.qr_active:
                         self.draw_qr_overlay()
+                    self.draw_notice_overlay()
                     self.draw_button_hold_overlay()
 
                 if ROTATE_SCREEN:

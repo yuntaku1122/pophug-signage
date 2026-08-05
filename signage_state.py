@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 
 _lock = threading.Lock()
 
@@ -166,6 +167,44 @@ def set_priority_tag(image_folder, filename, tag):
 def priority_mtime(image_folder):
     """優先表示タグファイルの更新時刻だけを返す（存在しなければNone）"""
     path = _priority_path(image_folder)
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+# ---------------- サイネージ画面への通知（ワンショット） ----------------
+# Web側で行った操作（Wi-Fi情報の削除など）を、サイネージ本体の画面にも
+# 一時的なバナーとして表示するための仕組み。images/.notice.json に
+# {"message": ..., "ts": ...} を書き込み、main.py側はファイルの更新時刻が
+# 変わったタイミングだけ検知して数秒間表示する（中身を毎回読み直す訳ではないので軽い）。
+
+def _notice_path(image_folder):
+    return os.path.join(image_folder, ".notice.json")
+
+
+def save_notice(image_folder, message):
+    """サイネージ画面に一時表示するメッセージを保存する"""
+    path = _notice_path(image_folder)
+    with _lock:
+        _atomic_write_json(path, {"message": message, "ts": time.time()})
+
+
+def load_notice(image_folder):
+    """保存されている通知（{"message":..., "ts":...}）を返す。無ければNone"""
+    path = _notice_path(image_folder)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def notice_mtime(image_folder):
+    """通知ファイルの更新時刻だけを返す（存在しなければNone）"""
+    path = _notice_path(image_folder)
     try:
         return os.path.getmtime(path)
     except OSError:
