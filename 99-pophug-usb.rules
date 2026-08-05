@@ -6,13 +6,17 @@
 #
 #   KERNEL=="sd[a-z][0-9]"  … パーティションのみに限定（ディスク全体 sda 等は除外）
 #   ENV{ID_BUS}=="usb"      … 追加時のみ。USB接続のものだけに限定
-#                              （SDカード本体はmmcblk0側の名前空間なので元々対象外。
-#                              取り外し時はデバイス情報が引けないことがあるため
-#                              ID_BUSでの絞り込みは行わない）
+#                              （SDカード本体はmmcblk0側の名前空間なので元々対象外）
+#
+# 追加(add)は SYSTEMD_WANTS で起動するが、取り外し(remove)はデバイスのsysfs
+# エントリが消えていく最中に評価されるため、SYSTEMD_WANTSでは起動が
+# 無視されてしまうことがある（実機で確認済み）。removeイベントについては
+# RUN+= で直接 systemctl start を呼び出す、より確実な方式にする
+# （--no-blockなので、udevワーカー側は即座に処理を返し実行をブロックしない）。
 #
 # インストール:
 #   sudo cp 99-pophug-usb.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules
 # ============================================
 SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]", ACTION=="add", ENV{ID_BUS}=="usb", TAG+="systemd", ENV{SYSTEMD_WANTS}+="pophug-usb-import@%k-add.service"
-SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]", ACTION=="remove", TAG+="systemd", ENV{SYSTEMD_WANTS}+="pophug-usb-import@%k-remove.service"
+SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]", ACTION=="remove", RUN+="/usr/bin/systemctl --no-block start pophug-usb-import@%k-remove.service"
