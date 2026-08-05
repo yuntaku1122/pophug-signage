@@ -33,7 +33,18 @@ def log(msg):
 
 _font_path_cache = {"path": None, "searched": False}
 
+# サイズごとに作成済みのFontオブジェクトを使い回すキャッシュ。
+# pygame.font.Font(path, size)はフォントファイル（日本語フォントは
+# 数十MBになることがある）からサイズごとにグリフを構築する重い処理のため、
+# 毎回作り直すと（特に取扱説明画面のように毎フレーム呼ばれる場面で）
+# 非力なPi Zero 2WのCPUを不必要に占有してしまう。一度作ったサイズは
+# 使い回すことで、実質「同じサイズなら初回だけ」のコストに抑える。
+_font_object_cache = {}
+
 def get_japanese_font(size):
+    if size in _font_object_cache:
+        return _font_object_cache[size]
+
     if not _font_path_cache["searched"]:
         font_candidates = [
             "/System/Library/Fonts/ヒラギノ丸ゴ ProN W4.ttc",
@@ -55,12 +66,17 @@ def get_japanese_font(size):
             log("日本語フォントが見つからず、システムデフォルトフォントを使用します")
 
     path = _font_path_cache["path"]
+    font = None
     if path:
         try:
-            return pygame.font.Font(path, size)
+            font = pygame.font.Font(path, size)
         except Exception:
-            pass
-    return pygame.font.SysFont(None, size)
+            font = None
+    if font is None:
+        font = pygame.font.SysFont(None, size)
+
+    _font_object_cache[size] = font
+    return font
 
 
 class PopSignage:
