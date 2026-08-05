@@ -186,24 +186,30 @@ def import_images(source_dir, image_folder, ts=None):
     実際のUSBデバイスのマウント/アンマウント処理とは独立させてあり、
     USB無しでも（source_dirを普通のディレクトリに差し替えれば）検証できる。
 
+    以前に取り込み済み（内容のハッシュ値が一致）の画像が含まれている場合は、
+    再コピーはせず「表示」に戻すだけにする。これにより、複数人がそれぞれ
+    自分のUSBメモリーを持ち込んで運用する場合でも、USBメモリーを差し替える
+    だけで「自分が今まで取り込んだ画像一式」に切り替えることができる
+    （USBの中身をコピーし直す必要が無い）。
+
     戻り値: dict {
-        "imported": [...新規に取り込んだファイル名...],
-        "pinned": [...うち固定表示に設定したファイル名...],
-        "skipped_duplicate": 重複でスキップした件数,
+        "imported": [...今回新しくコピーしたファイル名...],
+        "restored": [...以前取り込み済みで、今回「表示」に戻したファイル名...],
+        "pinned": [...新規コピー分のうち固定表示に設定したファイル名...],
         "error": エラーメッセージ or None,
     }
     """
+    empty_result = {"imported": [], "restored": [], "pinned": [], "error": None}
+
     if signage_state is None:
-        return {"imported": [], "pinned": [], "skipped_duplicate": 0,
-                "error": "signage_state.pyが見つかりません（インストール先を確認してください）"}
+        return {**empty_result, "error": "signage_state.pyが見つかりません（インストール先を確認してください）"}
 
     os.makedirs(image_folder, exist_ok=True)
 
     try:
         entries = sorted(os.listdir(source_dir))
     except OSError as e:
-        return {"imported": [], "pinned": [], "skipped_duplicate": 0,
-                "error": f"USBメモリーの読み込みに失敗しました（{e}）"}
+        return {**empty_result, "error": f"USBメモリーの読み込みに失敗しました（{e}）"}
 
     # サブフォルダは対象外。トップレベルの対応拡張子ファイルのみを候補にする。
     # ドットファイル（.で始まる隠しファイル。macOSが自動生成する ._写真.jpg や
@@ -231,7 +237,7 @@ def import_images(source_dir, image_folder, ts=None):
                   if skipped_non_image == 0 else
                   "USBメモリーに取り込める画像が見つかりませんでした"
                   f"（{skipped_non_image}件は画像として認識できずスキップしました）")
-        return {"imported": [], "pinned": [], "skipped_duplicate": 0, "error": error}
+        return {**empty_result, "error": error}
 
     imported_hashes = signage_state.load_usb_imported(image_folder)
     hidden = signage_state.load_hidden(image_folder)
@@ -244,8 +250,8 @@ def import_images(source_dir, image_folder, ts=None):
 
     ts = ts or time.strftime("%Y%m%d_%H%M%S")
     new_filenames = []
+    restored_filenames = []
     new_pinned = []
-    skipped_duplicate = 0
     index = 1
 
     for name, full, ext in candidates:
@@ -255,9 +261,13 @@ def import_images(source_dir, image_folder, ts=None):
             log(f"{name} の読み込みに失敗しました（スキップ）: {e}")
             continue
 
-        if h in imported_hashes:
-            skipped_duplicate += 1
+        prior_name = imported_hashes.get(h)
+        if prior_name and os.path.exists(os.path.join(image_folder, prior_name)):
+            # 以前に取り込み済みで、実体もまだ残っている＝再コピーせず表示に戻すだけ
+            restored_filenames.append(prior_name)
             continue
+        # ハッシュ記録はあるが実体が消えている（Web画面で削除された等）場合は、
+        # 新規取り込みと同様に扱う（下へフォールスルー）
 
         is_pinned = name.lower().startswith(FIXED_PREFIX)
         dest_name = f"usb_{ts}_{index:03d}{ext}"
@@ -279,18 +289,18 @@ def import_images(source_dir, image_folder, ts=None):
             new_pinned.append(dest_name)
             pinned.add(dest_name)
 
-    if not new_filenames:
-        msg = ("USBメモリー内の画像はすべて取り込み済みでした" if skipped_duplicate
-               else "取り込める画像がありませんでした")
-        return {"imported": [], "pinned": [], "skipped_duplicate": skipped_duplicate, "error": msg}
+    batch = set(new_filenames) | set(restored_filenames)
+    if not batch:
+        return {**empty_result, "error": "取り込める画像がありませんでした"}
 
-    # 今回取り込んだ画像・固定表示画像 以外の既存画像を一括で非表示化する
-    # （削除はしない＝Web画面のギャラリーには残り、後で手動で表示に戻せる）
+    # 今回のUSBの内容（新規コピー分＋表示に戻した分）・固定表示画像 以外の
+    # 既存画像を一括で非表示化する（削除はしない＝Web画面のギャラリーには残り、
+    # 後で手動で表示に戻せる）
     for f in existing_before:
-        if f in new_filenames or f in pinned:
+        if f in batch or f in pinned:
             continue
         hidden.add(f)
-    for f in new_filenames:
+    for f in batch:
         hidden.discard(f)
 
     signage_state.save_hidden(image_folder, hidden)
@@ -299,22 +309,28 @@ def import_images(source_dir, image_folder, ts=None):
 
     return {
         "imported": new_filenames,
+        "restored": restored_filenames,
         "pinned": new_pinned,
-        "skipped_duplicate": skipped_duplicate,
         "error": None,
     }
 
 
 def build_notice_message(result):
-    if result["error"] and not result["imported"]:
+    if result["error"] and not (result["imported"] or result["restored"]):
         return result["error"]
 
-    msg = f"USBから画像を{len(result['imported'])}枚取り込みました"
+    total = len(result["imported"]) + len(result["restored"])
+    msg = f"USBから画像を{total}枚表示しました"
+    details = []
+    if result["imported"]:
+        details.append(f"新規{len(result['imported'])}枚")
+    if result["restored"]:
+        details.append(f"取り込み済みを再表示{len(result['restored'])}枚")
     if result["pinned"]:
-        msg += f"（うち固定表示{len(result['pinned'])}枚）"
+        details.append(f"うち固定表示{len(result['pinned'])}枚")
+    if details:
+        msg += "（" + "・".join(details) + "）"
     msg += "。以前の画像は非表示になりました。USBを取り外してください"
-    if result["skipped_duplicate"]:
-        msg += f"（取り込み済みの{result['skipped_duplicate']}枚はスキップしました）"
     return msg
 
 
