@@ -156,6 +156,64 @@ def save_usb_imported(image_folder, imported_map):
         _atomic_write_json(path, imported_map)
 
 
+# ---------------- 固定表示のON/OFFに合わせたファイル名の付け替え ----------------
+# USB取り込み機能では、USBメモリー上でファイル名の先頭に「fixed_」を付けておくと
+# 固定表示として取り込まれる（README参照）。この命名規則をWeb設定画面からの
+# 固定表示ON/OFFでも踏襲し、ファイル名を見ただけでどれが固定表示画像か
+# 分かるようにする（USB機能導入前にアップロード済みの画像を後から固定表示に
+# した場合など、ファイル名だけでは判別できない、という問題への対応）。
+
+def rename_for_pin_state(image_folder, filename, want_pinned):
+    """固定表示のON/OFFに合わせて、ファイル名の先頭のfixed_接頭辞を付け外しする。
+    実際に名前が変わった場合は新しいファイル名を、変える必要が無い・変えられ
+    なかった場合は元のファイル名をそのまま返す。リネームに伴い、非表示リスト・
+    優先表示・USB取り込み履歴に残っている古いファイル名の参照も新しい名前へ
+    付け替える（.pinned.json自体は呼び出し元で新しい名前を使って保存すること）。"""
+    if want_pinned and not filename.lower().startswith("fixed_"):
+        new_name = "fixed_" + filename
+    elif not want_pinned and filename.lower().startswith("fixed_"):
+        new_name = filename[len("fixed_"):]
+        if not new_name:
+            return filename  # 接頭辞しか無いような異常なファイル名は触らない
+    else:
+        return filename  # 既に望む状態の命名になっている
+
+    old_path = os.path.join(image_folder, filename)
+    new_path = os.path.join(image_folder, new_name)
+
+    if not os.path.exists(old_path) or os.path.exists(new_path):
+        # 元ファイルが無い、または同名ファイルが既にある（衝突）場合は
+        # 安全のためリネームせず、元のファイル名のままにする
+        return filename
+
+    try:
+        os.rename(old_path, new_path)
+    except OSError:
+        return filename
+
+    hidden = load_hidden(image_folder)
+    if filename in hidden:
+        hidden.discard(filename)
+        hidden.add(new_name)
+        save_hidden(image_folder, hidden)
+
+    priority = load_priority(image_folder)
+    if filename in priority:
+        priority[new_name] = priority.pop(filename)
+        save_priority(image_folder, priority)
+
+    imported = load_usb_imported(image_folder)
+    changed = False
+    for h, saved_name in list(imported.items()):
+        if saved_name == filename:
+            imported[h] = new_name
+            changed = True
+    if changed:
+        save_usb_imported(image_folder, imported)
+
+    return new_name
+
+
 # ---------------- 表示設定（トランジション時間など） ----------------
 # アップロードページから変更した設定を images/.settings.json に保存する。
 # main.py側は定期的にこのファイルを読み直し、実行中の設定を上書きする。

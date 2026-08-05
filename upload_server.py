@@ -286,6 +286,13 @@ UPLOAD_PAGE = """
       })
         .then(function (r) { return r.json(); })
         .then(function (data) {
+          if (data.renamed) {
+            // ファイル名が変わった（fixed_接頭辞の付け外し）＝この要素が持つ
+            // data-filename（このチェックボックス・削除ボタン・優先表示セレクトなど）が
+            // 古いファイル名のままだと以後の操作が失敗するため、素直にページを再読込する
+            window.location.reload();
+            return;
+          }
           label.textContent = data.pinned ? '固定表示中' : '固定表示ではない';
           label.classList.remove('is-updating');
           var existingBadge = item.querySelector('.pin-badge');
@@ -1078,13 +1085,27 @@ def create_app(image_folder):
     @app.route("/toggle-pinned", methods=["POST"])
     def toggle_pinned():
         filename = request.form.get("filename")
+        final_filename = filename
         is_pinned = False
+        renamed = False
         if filename:
             pinned_set = signage_state.toggle_pinned(image_folder, filename)
             is_pinned = filename in pinned_set
 
+            # 固定表示のON/OFFに合わせて、ファイル名のfixed_接頭辞を付け外しする
+            # （USB取り込み機能と同じ命名規則にし、ファイル名を見ただけで
+            # 固定表示画像だと分かるようにするため）
+            new_name = signage_state.rename_for_pin_state(image_folder, filename, is_pinned)
+            if new_name != filename:
+                renamed = True
+                final_filename = new_name
+                pinned_set.discard(filename)
+                if is_pinned:
+                    pinned_set.add(new_name)
+                signage_state.save_pinned(image_folder, pinned_set)
+
         if request.headers.get("Accept") == "application/json":
-            return {"filename": filename, "pinned": is_pinned}, 200
+            return {"filename": final_filename, "pinned": is_pinned, "renamed": renamed}, 200
 
         return redirect("/")
 
