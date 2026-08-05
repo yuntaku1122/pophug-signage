@@ -129,7 +129,7 @@ class PopSignage:
         self.last_notice_mtime = notice_mtime(IMAGE_FOLDER)
         self.notice_text = None
         self.notice_hide_time = 0
-        self.notice_surface = None
+        self.notice_lines = []  # 通知バナーの各行のSurface（折り返し済み）
 
         self.qr_active = False        # QRコードオーバーレイの表示中フラグ
         self.qr_hide_time = 0
@@ -541,27 +541,32 @@ class PopSignage:
         スライドショー自体は止めない（QRのように操作を待つものではなく、
         あくまで「今こういう操作がありました」という控えめな通知のため）。
         sticky=Trueの時は「取り外すまで表示」系の通知として、通常より長く
-        （NOTICE_STICKY_MAX_SECONDSを上限に）表示し続ける。"""
+        （NOTICE_STICKY_MAX_SECONDSを上限に）表示し続ける。
+        長いメッセージ（USB取り込み完了時の詳細な内訳など）でも画面からはみ出さない
+        よう、1行の大きさを固定して複数行に折り返す（取扱説明画面と同じ方式）。"""
         max_width = self.canvas.get_width() - 64
-        self.notice_surface = self._render_fit_text(
-            message, max_width, start_size=22, min_size=13, color=(255, 255, 255))
+        font = get_japanese_font(22)
+        self.notice_lines = [
+            font.render(line, True, (255, 255, 255))
+            for line in self._wrap_text_lines(message, font, max_width)
+        ]
         seconds = NOTICE_STICKY_MAX_SECONDS if sticky else NOTICE_DISPLAY_SECONDS
         self.notice_hide_time = time.time() + seconds
         log(f"サイネージ画面に通知を表示: {message}" + ("（sticky）" if sticky else ""))
 
     def _hide_notice(self):
         """表示中の通知バナーを即座に消す（USBメモリー取り外し検知など）"""
-        self.notice_surface = None
+        self.notice_lines = []
         self.notice_hide_time = 0
 
     def draw_notice_overlay(self):
-        if time.time() >= self.notice_hide_time or self.notice_surface is None:
+        if time.time() >= self.notice_hide_time or not self.notice_lines:
             return
         w = self.canvas.get_width()
-        surf = self.notice_surface
-        pad_x, pad_y = 20, 12
-        box_w = surf.get_width() + pad_x * 2
-        box_h = surf.get_height() + pad_y * 2
+        pad_x, pad_y, line_gap = 20, 12, 4
+        box_w = max(s.get_width() for s in self.notice_lines) + pad_x * 2
+        box_h = (sum(s.get_height() for s in self.notice_lines)
+                 + line_gap * (len(self.notice_lines) - 1) + pad_y * 2)
         box_x = w // 2 - box_w // 2
         box_y = 16
 
@@ -569,7 +574,11 @@ class PopSignage:
         box.set_alpha(225)
         box.fill((34, 139, 34))
         self.canvas.blit(box, (box_x, box_y))
-        self.canvas.blit(surf, (box_x + pad_x, box_y + pad_y))
+
+        y = box_y + pad_y
+        for surf in self.notice_lines:
+            self.canvas.blit(surf, (box_x + box_w // 2 - surf.get_width() // 2, y))
+            y += surf.get_height() + line_gap
 
     def show_qr_code(self):
         """アップロードページのURLをQRコードとして生成し、画面に一定時間オーバーレイ表示する。
