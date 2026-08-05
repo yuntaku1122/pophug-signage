@@ -11,16 +11,23 @@
 # 処理の流れ:
 #   1. 対象パーティションを読み取り専用でマウント（USB側は一切変更しない）
 #   2. トップレベル（サブフォルダは対象外）の画像ファイルだけを走査
+#      （ドットファイル・拡張子と中身が一致しないファイルは除外。macOSでUSBメモリーを
+#      扱うと自動生成される ._写真.jpg のようなAppleDouble付随ファイルが、
+#      本物の画像として誤って取り込まれてしまうのを防ぐため）
 #   3. 内容のハッシュ値で重複チェックし、未取込のものだけ
 #      images/usb_YYYYMMDD_HHMMSS_連番.拡張子 としてコピー
 #   4. ファイル名が「fixed_」で始まるものは「固定表示」として登録
 #      （images/.pinned.json。優先表示等と同じくWeb設定画面からも切替可能）
 #   5. 今回取り込んだ画像・固定表示画像 以外の既存画像を一括で非表示化
 #      （＝USB取り込み後は、そのUSBの内容＋固定表示画像だけが表示される）
-#   6. 本体画面に完了通知（images/.notice.json）を出し、アンマウント
+#   6. 本体画面に完了通知（images/.notice.json、USBを抜くまで表示され続ける）を出し、
+#      アンマウント
+#   7. USBメモリーが抜かれたら（udevのremoveイベント）、表示中の通知を消す
 #
 # 使い方:
-#   pophug-usb-import <デバイス名 例: sda1>
+#   pophug-usb-import <デバイス名-add 例: sda1-add>    …挿入時
+#   pophug-usb-import <デバイス名-remove 例: sda1-remove> …取り外し時
+#   pophug-usb-import <デバイス名>                      …後方互換（-add扱い）
 #
 # インストール:
 #   sudo cp pophug-usb-import /usr/local/bin/
@@ -56,6 +63,15 @@ FIXED_PREFIX = "fixed_"
 SUPPORTED_EXT = (".jpg", ".jpeg", ".png")
 DEVICE_RE = re.compile(r"^sd[a-z][0-9]+$")
 LOCK_PATH = "/tmp/pophug-usb-import.lock"
+
+# 拡張子ごとの正しいマジックバイト（ファイル先頭の署名）。
+# macOSのAppleDouble付随ファイル(._*)等、拡張子だけ画像に見えて中身が
+# 画像ではないファイルを弾くための最終チェックに使う。
+MAGIC_BYTES = {
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+}
 
 # signage_state.py（標準ライブラリのみに依存）をアプリ本体のディレクトリから
 # 直接importする。atomic書き込みや各状態ファイルの読み書きロジックを
@@ -148,6 +164,21 @@ def file_hash(path):
     return h.hexdigest()
 
 
+def looks_like_valid_image(path, ext):
+    """拡張子どおりのマジックバイト（ファイル先頭の署名）を持っているか確認する。
+    macOSのAppleDouble付随ファイル(._写真.jpg)等、拡張子だけ画像に見えて
+    中身が画像ではないファイルを弾くための最終チェック。"""
+    signatures = MAGIC_BYTES.get(ext)
+    if not signatures:
+        return True  # 対象外拡張子は呼び出し元で既に除外されている
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return False
+    return any(head.startswith(sig) for sig in signatures)
+
+
 def import_images(source_dir, image_folder, ts=None):
     """マウント済み(または単体テスト用に用意した通常の)ディレクトリsource_dirの
     トップレベルにある画像を、image_folderへ取り込む中核ロジック。
@@ -174,19 +205,33 @@ def import_images(source_dir, image_folder, ts=None):
         return {"imported": [], "pinned": [], "skipped_duplicate": 0,
                 "error": f"USBメモリーの読み込みに失敗しました（{e}）"}
 
-    # サブフォルダは対象外。トップレベルの対応拡張子ファイルのみを候補にする
+    # サブフォルダは対象外。トップレベルの対応拡張子ファイルのみを候補にする。
+    # ドットファイル（.で始まる隠しファイル。macOSが自動生成する ._写真.jpg や
+    # .DS_Store 等）は、拡張子が一致していても除外する
     candidates = []
+    skipped_non_image = 0
     for name in entries:
+        if name.startswith("."):
+            continue
         full = os.path.join(source_dir, name)
         if not os.path.isfile(full):
             continue
         ext = os.path.splitext(name)[1].lower()
-        if ext in SUPPORTED_EXT:
-            candidates.append((name, full, ext))
+        if ext not in SUPPORTED_EXT:
+            continue
+        if not looks_like_valid_image(full, ext):
+            # 拡張子は画像だが中身が画像ではない（AppleDouble等）。取り込まない
+            log(f"{name} は画像として認識できないためスキップします")
+            skipped_non_image += 1
+            continue
+        candidates.append((name, full, ext))
 
     if not candidates:
-        return {"imported": [], "pinned": [], "skipped_duplicate": 0,
-                "error": "USBメモリーに取り込める画像が見つかりませんでした"}
+        error = ("USBメモリーに取り込める画像が見つかりませんでした"
+                  if skipped_non_image == 0 else
+                  "USBメモリーに取り込める画像が見つかりませんでした"
+                  f"（{skipped_non_image}件は画像として認識できずスキップしました）")
+        return {"imported": [], "pinned": [], "skipped_duplicate": 0, "error": error}
 
     imported_hashes = signage_state.load_usb_imported(image_folder)
     hidden = signage_state.load_hidden(image_folder)
@@ -273,45 +318,76 @@ def build_notice_message(result):
     return msg
 
 
+def parse_arg(arg):
+    """systemdのインスタンス名（%i）から (デバイス名, イベント種別) を取り出す。
+    例: "sda1-add" -> ("sda1", "add"), "sda1-remove" -> ("sda1", "remove")。
+    末尾に-add/-removeが無い場合は後方互換としてadd扱いにする。"""
+    if arg.endswith("-remove"):
+        return arg[: -len("-remove")], "remove"
+    if arg.endswith("-add"):
+        return arg[: -len("-add")], "add"
+    return arg, "add"
+
+
 def main():
     if len(sys.argv) != 2:
-        sys.exit("usage: pophug-usb-import <device name e.g. sda1>")
+        sys.exit("usage: pophug-usb-import <device-event e.g. sda1-add / sda1-remove>")
 
-    device_name = sys.argv[1]
+    device_name, event = parse_arg(sys.argv[1])
+
     if not DEVICE_RE.match(device_name):
         sys.exit(f"invalid device name: {device_name}")
-
-    device_path = f"/dev/{device_name}"
-    if not os.path.exists(device_path):
-        sys.exit(f"device not found: {device_path}")
 
     if signage_state is None:
         sys.exit(f"signage_state.py not found under {REPO_DIR}")
 
-    # 複数のUSBパーティションがほぼ同時に挿入された場合の競合を避けるため、
+    # 複数のUSBパーティションがほぼ同時に挿抜された場合の競合を避けるため、
     # 状態ファイル(.hidden.json等)を触る一連の処理を直列化する
     lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR)
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
     try:
-        ok, err = mount_readonly(device_path)
-        if not ok:
-            log(f"マウント失敗: {err}")
-            signage_state.save_notice(IMAGE_FOLDER, f"USBメモリーを読み込めませんでした（{err}）")
-            fix_ownership(IMAGE_FOLDER)
-            return
-
-        try:
-            result = import_images(MOUNT_POINT, IMAGE_FOLDER)
-        finally:
-            unmount()
-
-        message = build_notice_message(result)
-        signage_state.save_notice(IMAGE_FOLDER, message)
-        fix_ownership(IMAGE_FOLDER)
-        log(message)
+        if event == "remove":
+            handle_removal()
+        else:
+            handle_add(device_name)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+
+def handle_removal():
+    """USBメモリーが取り外された時（udevのremoveイベント）に呼ばれる。
+    表示中の「USBを取り外してください」通知（sticky）を消す。
+    読み取り専用マウントなので、抜くタイミングによってUSB側が壊れる心配は無い。"""
+    signage_state.clear_notice(IMAGE_FOLDER)
+    fix_ownership(IMAGE_FOLDER)
+    log("USBメモリーの取り外しを検知し、通知を消去しました")
+
+
+def handle_add(device_name):
+    """USBメモリーが挿入された時（udevのaddイベント）に呼ばれる。"""
+    device_path = f"/dev/{device_name}"
+    if not os.path.exists(device_path):
+        sys.exit(f"device not found: {device_path}")
+
+    ok, err = mount_readonly(device_path)
+    if not ok:
+        log(f"マウント失敗: {err}")
+        signage_state.save_notice(IMAGE_FOLDER, f"USBメモリーを読み込めませんでした（{err}）", sticky=True)
+        fix_ownership(IMAGE_FOLDER)
+        return
+
+    try:
+        result = import_images(MOUNT_POINT, IMAGE_FOLDER)
+    finally:
+        unmount()
+
+    message = build_notice_message(result)
+    # 取り込み結果に関わらず、USBを抜いてよいタイミングをユーザーが見て
+    # 判断できるよう、抜くまで（handle_removalが呼ばれるまで）表示し続ける
+    signage_state.save_notice(IMAGE_FOLDER, message, sticky=True)
+    fix_ownership(IMAGE_FOLDER)
+    log(message)
 
 
 if __name__ == "__main__":

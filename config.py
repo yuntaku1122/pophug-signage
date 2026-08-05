@@ -51,6 +51,9 @@ QR_BUTTON_ENABLED = True
 QR_BUTTON_GPIO_PIN = 17       # BCM番号。配線に合わせて変更（ボタンはこのピンとGNDの間に接続、内部プルアップ使用）
 QR_DISPLAY_SECONDS = 30       # QRコードを表示し続ける時間（秒）
 NOTICE_DISPLAY_SECONDS = 6    # Web側の操作結果をサイネージ画面にバナー表示する時間（秒）
+NOTICE_STICKY_MAX_SECONDS = 600  # 「取り外すまで表示」系の通知の上限（秒）。
+                                  # USB取り外し検知で本来は即座に消えるが、
+                                  # 検知漏れ時に永久に画面をふさがないための保険の上限
 UPLOAD_URL_OVERRIDE = None    # 固定IPで運用する場合など、URLを手動指定したい時は文字列で指定 (例: "http://192.168.4.1:8080")
 
 # 取扱説明モード設定

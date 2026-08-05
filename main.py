@@ -536,15 +536,23 @@ class PopSignage:
             self._qr_pause_start = None
         self.qr_active = False
 
-    def _show_notice(self, message):
-        """Web側の操作結果を、サイネージ画面上部に数秒間バナー表示する。
+    def _show_notice(self, message, sticky=False):
+        """Web側の操作結果を、サイネージ画面上部にバナー表示する。
         スライドショー自体は止めない（QRのように操作を待つものではなく、
-        あくまで「今こういう操作がありました」という控えめな通知のため）。"""
+        あくまで「今こういう操作がありました」という控えめな通知のため）。
+        sticky=Trueの時は「取り外すまで表示」系の通知として、通常より長く
+        （NOTICE_STICKY_MAX_SECONDSを上限に）表示し続ける。"""
         max_width = self.canvas.get_width() - 64
         self.notice_surface = self._render_fit_text(
             message, max_width, start_size=22, min_size=13, color=(255, 255, 255))
-        self.notice_hide_time = time.time() + NOTICE_DISPLAY_SECONDS
-        log(f"サイネージ画面に通知を表示: {message}")
+        seconds = NOTICE_STICKY_MAX_SECONDS if sticky else NOTICE_DISPLAY_SECONDS
+        self.notice_hide_time = time.time() + seconds
+        log(f"サイネージ画面に通知を表示: {message}" + ("（sticky）" if sticky else ""))
+
+    def _hide_notice(self):
+        """表示中の通知バナーを即座に消す（USBメモリー取り外し検知など）"""
+        self.notice_surface = None
+        self.notice_hide_time = 0
 
     def draw_notice_overlay(self):
         if time.time() >= self.notice_hide_time or self.notice_surface is None:
@@ -1152,7 +1160,11 @@ class PopSignage:
                         self.last_notice_mtime = current_notice_mtime
                         notice = load_notice(IMAGE_FOLDER)
                         if notice and notice.get("message"):
-                            self._show_notice(notice["message"])
+                            self._show_notice(notice["message"], sticky=notice.get("sticky", False))
+                        else:
+                            # 通知ファイルが削除された（USBメモリー取り外し検知等）
+                            # ＝表示中のsticky通知を即座に消す合図
+                            self._hide_notice()
 
                 if now - self.last_scan_time >= RESCAN_INTERVAL:
                     self.last_scan_time = now
