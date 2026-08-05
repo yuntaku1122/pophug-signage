@@ -146,6 +146,13 @@ class PopSignage:
         self.manual_active = False    # ボタン長押しで手動表示中かどうか
         self.manual_page_index = 0
         self.manual_page_start_time = 0
+        # 取扱説明ページのレンダリング結果（タイトル/本文/フッターのSurface）を
+        # キャッシュする。ページ内容はMANUAL_PAGE_SECONDSごとにしか変わらないため、
+        # 毎フレーム文字を描き直す必要は無い（キャッシュキーが変わった時だけ再描画する）
+        self._manual_render_cache = {"key": None}
+        # 画面右下のバージョン表示（ホスト名・バージョン番号）は実行中は変化しないため、
+        # 一度だけ描画してSurfaceを使い回す
+        self._watermark_surface_cache = None
 
         self.wifi_setup_active = False   # 「接続情報の画面」を今表示しているか
         self.wifi_setup_start_time = 0
@@ -715,11 +722,15 @@ class PopSignage:
 
     def _draw_version_watermark(self):
         """画面右下に小さくバージョン番号とホスト名を表示する（QR/取扱説明/Wi-Fiセットアップ画面用。
-        Webページを開かなくても、画面を見ただけで今のバージョン・機体が分かるようにするため）"""
+        Webページを開かなくても、画面を見ただけで今のバージョン・機体が分かるようにするため）。
+        内容（ホスト名・バージョン）はプロセス実行中は変わらないため、初回だけ描画してSurfaceを使い回す。"""
+        if self._watermark_surface_cache is None:
+            hostname = socket.gethostname()
+            self._watermark_surface_cache = get_japanese_font(14).render(
+                f"{hostname} / v{__version__}", True, (140, 140, 140))
+        surf = self._watermark_surface_cache
         w = self.canvas.get_width()
         h = self.canvas.get_height()
-        hostname = socket.gethostname()
-        surf = get_japanese_font(14).render(f"{hostname} / v{__version__}", True, (140, 140, 140))
         self.canvas.blit(surf, (w - surf.get_width() - 12, h - surf.get_height() - 10))
 
     # ---------------- 取扱説明モード ----------------
@@ -755,7 +766,10 @@ class PopSignage:
 
     def draw_manual_screen(self):
         """取扱説明の現在のページを描画し、一定時間ごとに自動でページ送りする。
-        （写真が1枚も無い時の自動表示、ボタン長押しでの手動表示、両方から呼ばれる）"""
+        （写真が1枚も無い時の自動表示、ボタン長押しでの手動表示、両方から呼ばれる）
+        ページ内容（タイトル・本文・フッター）のレンダリング結果はキャッシュし、
+        ページが切り替わった時（またはキャンバスサイズが変わった時）だけ再描画する。
+        毎フレーム日本語テキストを描き直すのは、非力なPi Zero 2Wには重すぎるため。"""
         w = self.canvas.get_width()
         h = self.canvas.get_height()
         self.canvas.fill((24, 24, 30))
@@ -768,24 +782,39 @@ class PopSignage:
             self.manual_page_start_time = now
             self.manual_page_index = (self.manual_page_index + 1) % len(MANUAL_PAGES)
 
-        page = MANUAL_PAGES[self.manual_page_index % len(MANUAL_PAGES)]
+        page_index = self.manual_page_index % len(MANUAL_PAGES)
         max_width = w - 64
+        cache_key = (page_index, w, h)
 
-        title_surf = self._render_fit_text(
-            page["title"], max_width, start_size=32, min_size=18, color=(255, 210, 110))
+        if self._manual_render_cache.get("key") != cache_key:
+            page = MANUAL_PAGES[page_index]
 
-        body_font = get_japanese_font(22)
-        body_surfaces = []
-        for raw_line in page["body"].split("\n"):
-            if not raw_line:
-                body_surfaces.append(None)  # 空行は余白として扱う
-                continue
-            for wrapped_line in self._wrap_text_lines(raw_line, body_font, max_width):
-                body_surfaces.append(body_font.render(wrapped_line, True, (225, 225, 225)))
+            title_surf = self._render_fit_text(
+                page["title"], max_width, start_size=32, min_size=18, color=(255, 210, 110))
 
-        footer_surf = self._render_fit_text(
-            f"{self.manual_page_index + 1} / {len(MANUAL_PAGES)}　（ボタンで閉じる）",
-            max_width, start_size=16, min_size=11, color=(150, 150, 150))
+            body_font = get_japanese_font(22)
+            body_surfaces = []
+            for raw_line in page["body"].split("\n"):
+                if not raw_line:
+                    body_surfaces.append(None)  # 空行は余白として扱う
+                    continue
+                for wrapped_line in self._wrap_text_lines(raw_line, body_font, max_width):
+                    body_surfaces.append(body_font.render(wrapped_line, True, (225, 225, 225)))
+
+            footer_surf = self._render_fit_text(
+                f"{page_index + 1} / {len(MANUAL_PAGES)}　（ボタンで閉じる）",
+                max_width, start_size=16, min_size=11, color=(150, 150, 150))
+
+            self._manual_render_cache = {
+                "key": cache_key,
+                "title_surf": title_surf,
+                "body_surfaces": body_surfaces,
+                "footer_surf": footer_surf,
+            }
+
+        title_surf = self._manual_render_cache["title_surf"]
+        body_surfaces = self._manual_render_cache["body_surfaces"]
+        footer_surf = self._manual_render_cache["footer_surf"]
 
         total_h = title_surf.get_height() + 26
         for s in body_surfaces:
