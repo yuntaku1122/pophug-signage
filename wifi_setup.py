@@ -77,6 +77,13 @@ def is_wifi_retry_in_progress():
     return os.path.exists(RETRY_MARKER_PATH)
 
 
+def forget_known_networks(timeout=30):
+    """保存済みの(接続したことのある)Wi-Fiプロファイルを全て削除する。
+    このPi自身のセットアップ用アクセスポイントは対象外（standaloneモードの
+    土台が壊れないようにするため）。"""
+    return _run_netctl(["forget-known"], timeout=timeout)
+
+
 def scan_networks():
     """周辺のWi-Fi一覧を返す（電波の強い順、SSID重複は除去）"""
     ok, out, _err = _run_netctl(["scan"], timeout=20)

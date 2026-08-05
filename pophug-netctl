@@ -15,6 +15,7 @@
 #   pophug-netctl scan
 #   pophug-netctl connect <ssid> <password>
 #   pophug-netctl retry-known
+#   pophug-netctl forget-known
 #
 # インストール:
 #   sudo cp pophug-netctl /usr/local/bin/
@@ -269,12 +270,30 @@ def cmd_retry_known(args):
             pass
 
 
+def cmd_forget_known(args):
+    """保存済みの(このPiが接続したことのある)Wi-Fiプロファイルを全て削除する。
+
+    このPi自身のセットアップ用アクセスポイント(HOTSPOT_CON_NAME)は対象外とする。
+    これを消してしまうと、スタンドアロンモードの土台ごと壊れ、この機能を呼び出す
+    ためのWeb画面自体に再アクセスする手段が失われかねないため。"""
+    r = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"])
+    deleted = []
+    for line in r.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2 and parts[1] == "802-11-wireless" and parts[0] != HOTSPOT_CON_NAME:
+            name = parts[0]
+            run(["nmcli", "connection", "delete", name])
+            deleted.append(name)
+    print(f"deleted:{len(deleted)}")
+
+
 COMMANDS = {
     "hotspot-start": cmd_hotspot_start,
     "hotspot-stop": cmd_hotspot_stop,
     "scan": cmd_scan,
     "connect": cmd_connect,
     "retry-known": cmd_retry_known,
+    "forget-known": cmd_forget_known,
 }
 
 

@@ -413,6 +413,7 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
+| 4.23.0 | Wi-Fi設定画面に、保存済みのWi-Fi接続情報をまとめて削除するボタンを追加(本体自身のセットアップ用APは対象外) |
 | 4.22.2 | LICENSEファイル(PolyForm Noncommercial 1.0.0)を追加。README内に残っていた誤ったパス表記も修正 |
 | 4.22.1 | pophug-hostname-setupで、初回起動時のホスト名変更直後にavahi-daemonを再起動し、その場で.local名が使えるように修正(従来は再起動しないと.localで繋がらないことがあった) |
 | 4.22.0 | 写真アップロードQR画面に、接続中Wi-Fi状況の表示とIPアドレス版QRを追加(mDNSが機能しない環境向けの保険) |

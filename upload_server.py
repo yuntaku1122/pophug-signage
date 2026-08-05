@@ -20,6 +20,7 @@
 # ============================================
 
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -733,6 +734,16 @@ WIFI_SETUP_PAGE = """
     <p class="status" id="ap-status"></p>
   </div>
 
+  <div class="box" style="margin-top:16px; border-color:#c0392b;">
+    <h2 style="color:#c0392b;">保存済みのWi-Fi接続情報を削除</h2>
+    <p class="hint">これまでに接続したことのあるWi-Fi(過去のイベント会場のもの等)を、この本体からすべて忘れさせます。
+      <b>今つないでいるWi-Fiも対象になるため、実行するとこのスマホが一時的に切断されることがあります。</b>
+      この本体自身のセットアップ用アクセスポイント（ボタン長押しで出てくるもの）は影響を受けません。
+      写真やその他の設定はそのまま残ります。</p>
+    <button id="forget-known-btn" type="button" style="background:#c0392b;">保存済みのWi-Fi情報をすべて削除する</button>
+    <p class="status" id="forget-known-status"></p>
+  </div>
+
   <script>
   (function () {
     var list = document.getElementById('net-list');
@@ -870,6 +881,31 @@ WIFI_SETUP_PAGE = """
           status.textContent = '保存に失敗しました';
         });
     });
+
+    var forgetBtn = document.getElementById('forget-known-btn');
+    if (forgetBtn) {
+      forgetBtn.addEventListener('click', function () {
+        if (!confirm('保存済みのWi-Fi接続情報をすべて削除します。今つないでいるWi-Fiが対象の場合、このスマホの接続が切れることがあります。よろしいですか？')) {
+          return;
+        }
+        var status = document.getElementById('forget-known-status');
+        forgetBtn.disabled = true;
+        status.textContent = '削除しています…';
+        fetch('/wifi/forget-known', { method: 'POST' })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (data.status === 'ok') {
+              status.textContent = '削除しました（' + data.count + '件）。今の接続が切れた場合は、この本体のセットアップ用Wi-Fiに繋ぎ直してください。';
+            } else {
+              status.textContent = '削除に失敗しました: ' + (data.error || '不明なエラー');
+              forgetBtn.disabled = false;
+            }
+          })
+          .catch(function () {
+            status.textContent = '応答がありません。今の接続が切れた可能性があります（削除自体は完了している可能性が高いです）。';
+          });
+      });
+    }
   })();
   </script>
 </body>
@@ -1254,6 +1290,19 @@ def create_app(image_folder):
     @app.route("/wifi/retry-status")
     def wifi_retry_status_route():
         return wifi_retry_status
+
+    @app.route("/wifi/forget-known", methods=["POST"])
+    def wifi_forget_known():
+        print("[wifi] 保存済みWi-Fi情報の削除要求を受け付けました")
+        ok, out, err = wifi_setup.forget_known_networks()
+        if ok:
+            m = re.search(r"deleted:(\d+)", out or "")
+            count = int(m.group(1)) if m else 0
+            print(f"[wifi] 保存済みWi-Fi情報を削除しました（{count}件）")
+            return {"status": "ok", "count": count}
+        error_message = err or out or "不明なエラー"
+        print(f"[wifi] 保存済みWi-Fi情報の削除に失敗: {error_message}")
+        return {"status": "error", "error": error_message}, 500
 
     @app.route("/shutdown", methods=["POST"])
     def shutdown():
