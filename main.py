@@ -16,7 +16,8 @@ import threading
 from datetime import datetime
 from config import *
 from signage_state import (load_hidden, hidden_mtime, load_settings, settings_mtime,
-                            load_priority, PRIORITY_TAGS, load_notice, notice_mtime)
+                            load_priority, PRIORITY_TAGS, load_notice, notice_mtime,
+                            load_pinned, save_hidden)
 from version import __version__
 import wifi_setup
 import sd_watchdog
@@ -387,15 +388,17 @@ class PopSignage:
     # ---------------- QRコード表示ボタン ----------------
 
     def setup_qr_button(self):
-        """ボタン1つで4段階の操作を行う。
+        """ボタン1つで5段階の操作を行う。
         短押し             : QRコード表示/非表示トグル
-        MANUAL_HOLD_SECONDS秒以上長押し     : 取扱説明を表示
-        WIFI_SETUP_HOLD_SECONDS秒以上長押し : Wi-Fiセットアップモード
-        SHUTDOWN_HOLD_SECONDS秒以上長押し   : シャットダウン
+        MANUAL_HOLD_SECONDS秒以上長押し        : 取扱説明を表示
+        WIFI_SETUP_HOLD_SECONDS秒以上長押し    : Wi-Fiセットアップモード
+        RESET_DISPLAY_HOLD_SECONDS秒以上長押し : 表示リセット（固定表示のみ表示）
+        SHUTDOWN_HOLD_SECONDS秒以上長押し      : シャットダウン
         判定は「離した瞬間の合計長押し時間」で行う（押している間は毎フレーム
         run()から_poll_button()が呼ばれ、進捗を画面に表示する）。
         ラズパイ実機ではGPIOボタン、Mac等GPIOが無い環境では
-        Qキー(QR表示)・Mキー(取扱説明)・Wキー(Wi-Fiセットアップモード)・Sキー(シャットダウン)で代用する。"""
+        Qキー(QR表示)・Mキー(取扱説明)・Wキー(Wi-Fiセットアップモード)・
+        Rキー(表示リセット)・Sキー(シャットダウン)で代用する。"""
         self._qr_button = None
         self._button_press_start = None
         try:
@@ -404,11 +407,13 @@ class PopSignage:
             log(f"QRボタン待受け開始（GPIO{QR_BUTTON_GPIO_PIN}）: "
                 f"短押し=QR表示 / {MANUAL_HOLD_SECONDS}秒長押し=取扱説明 / "
                 f"{WIFI_SETUP_HOLD_SECONDS}秒長押し=Wi-Fiセットアップ / "
+                f"{RESET_DISPLAY_HOLD_SECONDS}秒長押し=表示リセット / "
                 f"{SHUTDOWN_HOLD_SECONDS}秒長押し=シャットダウン")
         except Exception as e:
             log(f"GPIOボタンが利用できません（{e}）。"
                 f"代わりにキーボードの[Q]キーでQR表示、[M]キーで取扱説明、"
-                f"[W]キーでWi-Fiセットアップ、[S]キーでシャットダウンを確認できます")
+                f"[W]キーでWi-Fiセットアップ、[R]キーで表示リセット、"
+                f"[S]キーでシャットダウンを確認できます")
 
     def _poll_button(self):
         """毎フレーム呼ばれ、物理ボタンの押下時間を監視する。gpiozeroのコールバックではなく
@@ -440,12 +445,39 @@ class PopSignage:
 
         if held_seconds >= SHUTDOWN_HOLD_SECONDS:
             self._trigger_button_shutdown()
+        elif held_seconds >= RESET_DISPLAY_HOLD_SECONDS:
+            self._reset_display_to_pinned_only()
         elif held_seconds >= WIFI_SETUP_HOLD_SECONDS:
             self.enter_wifi_setup_mode()
         elif held_seconds >= MANUAL_HOLD_SECONDS:
             self.toggle_manual()
         else:
             self.toggle_qr_code()
+
+    def _reset_display_to_pinned_only(self):
+        """ボタン長押しで、表示状態だけを初期化する（固定表示画像だけを表示状態にし、
+        それ以外を全て非表示にする）。images/フォルダの画像データ自体は一切削除しない。
+
+        次の事業者に本体を引き継ぐ場面を想定している。この操作をしておけば、
+        起動直後の画面は固定表示（例：市からのお知らせ）だけになり、次の事業者が
+        自分のUSBメモリーを挿すと、そのUSBの中身がそのまま表示されるようになる
+        （USB取り込み時の「固定表示以外を自動非表示化」する動作と同じ状態を、
+        USBを挿さずに手元のボタン操作だけで作れる）。"""
+        supported = ('.jpg', '.jpeg', '.png')
+        try:
+            files = [f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(supported)]
+        except OSError as e:
+            log(f"表示リセットに失敗しました（画像フォルダの読み込みエラー: {e}）")
+            return
+
+        pinned = load_pinned(IMAGE_FOLDER)
+        shown = [f for f in files if f in pinned]
+        hidden = set(f for f in files if f not in pinned)
+        save_hidden(IMAGE_FOLDER, hidden)
+
+        log(f"ボタン長押しにより表示をリセットしました"
+            f"（固定表示{len(shown)}枚のみ表示、{len(hidden)}枚を非表示化。画像データは削除していません）")
+        self._show_notice(f"表示をリセットしました（固定表示{len(shown)}枚のみ表示中）")
 
     def _trigger_button_shutdown(self):
         """物理ボタンの長押しでシャットダウンを実行する（Web版と同じsudoersの許可を利用）"""
@@ -495,9 +527,13 @@ class PopSignage:
         if held >= SHUTDOWN_HOLD_SECONDS:
             text = "離すとシャットダウンします"
             color = (255, 90, 90)
-        elif held >= WIFI_SETUP_HOLD_SECONDS:
+        elif held >= RESET_DISPLAY_HOLD_SECONDS:
             remaining = SHUTDOWN_HOLD_SECONDS - held
-            text = f"離すとWi-Fiセットアップモード（あと{remaining:.0f}秒でシャットダウン）"
+            text = f"離すと表示をリセット（固定表示のみに）（あと{remaining:.0f}秒でシャットダウン）"
+            color = (255, 170, 100)
+        elif held >= WIFI_SETUP_HOLD_SECONDS:
+            remaining = RESET_DISPLAY_HOLD_SECONDS - held
+            text = f"離すとWi-Fiセットアップモード（あと{remaining:.0f}秒で表示リセット）"
             color = (255, 210, 120)
         elif held >= MANUAL_HOLD_SECONDS:
             remaining = WIFI_SETUP_HOLD_SECONDS - held
@@ -1135,6 +1171,9 @@ class PopSignage:
                                 self.exit_wifi_setup_mode()
                             else:
                                 self.enter_wifi_setup_mode()
+                        if event.key == pygame.K_r:
+                            # Mac等、GPIOボタンが無い環境での表示リセット確認用
+                            self._reset_display_to_pinned_only()
                         if event.key == pygame.K_s:
                             # Mac等、GPIOボタンが無い環境でのシャットダウン確認用
                             self._trigger_button_shutdown()
