@@ -87,6 +87,13 @@ def _schedule_exfatprogs_install():
         print("exfatprogsのインストール予約に失敗しました（後で手動インストールしてください）")
 
 
+def _reexec_self(staging_dir):
+    """自己更新した直後に呼ぶ。今のプロセスを、たった今書き込んだ新しい
+    pophug-update-applyでそのまま置き換える（os.execvはプロセスを別プログラムの
+    実行に置き換える。成功時はこの関数から戻ってこない）。"""
+    os.execv(UPDATE_APPLY_DEST, [UPDATE_APPLY_DEST, staging_dir])
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit("usage: pophug-update-apply <staging_dir>")
@@ -97,12 +104,27 @@ def main():
 
     # このスクリプト自身を最初に自己更新する。実行中のプロセスはメモリ上に読み込み
     # 済みのファイル実体を使い続けるためこの場で上書きしても安全（Linuxのinodeの性質上、
-    # 実行中に自分自身のファイル内容を書き換えても今の実行には影響しない）。これにより、
-    # 「新しい配置ロジックを実行するには、まずそのロジック自体が配置されている必要がある」
-    # という鶏と卵の問題を解消し、以降のバージョンでこのスクリプト自体に変更が入っても
-    # 次回のアップデート適用時から自動的に反映されるようになる。
+    # 実行中に自分自身のファイル内容を書き換えても今の実行には影響しない）。
+    #
+    # ただし、自己更新した回だけは要注意で、「今動いているのは書き換え前の古い
+    # ロジックのまま」なので、このバージョンでpophug-update-apply自体に追加された
+    # 新しい配置ロジック（今回で言えばUSB機能一式のインストール）は、このまま
+    # 続行しても実行されない。これを補うため、自己更新できた場合は残りの処理を
+    # 続けず、たった今書き込んだ新しいファイルへos.execvでそのまま処理を
+    # 引き継ぐ。こうすることで、pophug-update-apply自体に変更が入るような
+    # バージョンへのアップデートも、SSHでの手動実行を挟まず、Web画面からの
+    # アップデート1回だけで完全に反映できる（execvは今のプロセスを新しい
+    # プログラムに置き換えるだけなので、再起動の予約が二重にされることもない。
+    # 新しいプロセスが最後に1回だけ予約する）。
     if _install_helper(staging_dir, "pophug-update-apply", UPDATE_APPLY_DEST):
         print("pophug-update-apply (self) updated")
+        try:
+            print("新しいバージョンのpophug-update-applyに処理を引き継ぎます...")
+            _reexec_self(staging_dir)
+        except OSError as e:
+            # 通常はここに到達しない（execvが成功すればプロセスごと置き換わるため）。
+            # 万一失敗した場合も、アップデート処理自体は失敗させず、今のロジックで続行する
+            print(f"新しいバージョンへの引き継ぎに失敗しました（今回はこのまま続行します）: {e}")
 
     if _install_helper(staging_dir, "pophug-netctl", NETCTL_DEST):
         print("pophug-netctl updated")
