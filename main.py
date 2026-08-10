@@ -548,16 +548,27 @@ class PopSignage:
         self.canvas.blit(surf, (w // 2 - surf.get_width() // 2, h // 2 - surf.get_height() // 2))
 
     def toggle_qr_code(self):
-        """QR表示中にもう一度押されたら即座に消す。非表示中なら新たに表示する。"""
+        """QR表示中にもう一度押されたら即座に消す。非表示中なら新たに表示する。
+
+        スタンドアロンモード（既知の外部Wi-Fiが見つからず、本体が自分専用の
+        アクセスポイントを立てている状態）の時は、単純にアップロードURLのQRだけを
+        見せると「スマホがそのアクセスポイントに接続していないためページが開けない」
+        という混乱を招く（実際に利用者から報告があった）。この場合は短押しでも、
+        Wi-Fiセットアップ画面と同じ「①まずAPに接続 → ②設定ページを開く」の
+        2ステップ案内画面を表示する。"""
         if self.wifi_setup_active:
-            # セットアップモード中はボタンをキャンセル操作として扱う
+            # セットアップモード中（案内画面表示中）はボタンをキャンセル操作として扱う
             self.exit_wifi_setup_mode()
             return
         if self.qr_active:
             self._hide_qr()
             log("QRコード非表示（ボタン再押下）")
-        else:
-            self.show_qr_code()
+            return
+        if self.standalone_active:
+            log("スタンドアロンモード中のため、QR短押しでも接続手順の案内画面を表示します")
+            self.enter_wifi_setup_mode()
+            return
+        self.show_qr_code()
 
     def _hide_qr(self):
         """QRコードを非表示にする。QR表示中に一時停止していたスライドショーの
