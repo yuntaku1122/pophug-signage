@@ -14,7 +14,18 @@
 #   4. staging_dir/pophug-signage.service があれば
 #      /etc/systemd/system/pophug-signage.service を置き換え、daemon-reloadする
 #      （Type=notify・WatchdogSec等、本体サービスの起動方法自体の設定もここで配信できるようにする）
-#   5. pophug-signage.service を再起動する
+#   5. staging_dir/pophug-usb-import があれば /usr/local/bin/pophug-usb-import を置き換える
+#   6. staging_dir/pophug-usb-import@.service があれば
+#      /etc/systemd/system/pophug-usb-import@.service を置き換え、daemon-reloadする
+#   7. staging_dir/99-pophug-usb.rules があれば /etc/udev/rules.d/99-pophug-usb.rules を
+#      置き換え、udevadm control --reload-rules する
+#   8. exfatprogsが未インストールなら、インストールをバックグラウンドで予約する
+#      （apt-get updateは数十秒かかることがあり、このスクリプト自体をブロックすると
+#      呼び出し元のタイムアウトでアップデート処理自体が失敗扱いになってしまうため、
+#      systemd-runで完全に切り離して非同期実行する。5〜8はUSB取り込み機能一式で、
+#      これにより新しいバージョンをOTA適用するだけで自動的にインストールされるように
+#      なる。以前は手順書のコマンドを毎回手動実行してもらう必要があった）
+#   9. pophug-signage.service を再起動する
 #
 # ファイルの展開・入れ替え・バックアップなど、それ以外の処理は
 # 全て非特権側(update_check.py)で行い、ここでは行わない。
@@ -36,6 +47,9 @@ NETCTL_DEST = "/usr/local/bin/pophug-netctl"
 HOSTNAME_SETUP_DEST = "/usr/local/bin/pophug-hostname-setup"
 HOSTNAME_SERVICE_DEST = "/etc/systemd/system/pophug-hostname-setup.service"
 SIGNAGE_SERVICE_DEST = "/etc/systemd/system/pophug-signage.service"
+USB_IMPORT_DEST = "/usr/local/bin/pophug-usb-import"
+USB_IMPORT_SERVICE_DEST = "/etc/systemd/system/pophug-usb-import@.service"
+USB_UDEV_RULES_DEST = "/etc/udev/rules.d/99-pophug-usb.rules"
 
 
 def _install_helper(staging_dir, filename, dest_path, mode=0o755):
@@ -47,6 +61,30 @@ def _install_helper(staging_dir, filename, dest_path, mode=0o755):
     os.chmod(dest_path, mode)
     shutil.chown(dest_path, user="root", group="root")
     return True
+
+
+def _schedule_exfatprogs_install():
+    """exFAT対応パッケージ(exfatprogs)が未インストールなら、バックグラウンドで
+    インストールを予約する。既にインストール済みなら何もしない（dpkg -sは
+    即座に返るため、通常のアップデートのたびに余計な処理は発生しない）。
+    apt-get updateは数十秒かかることがあり、このスクリプト自体（呼び出し元の
+    update_check.pyから短いタイムアウト付きで呼ばれる）をここでブロックすると
+    アップデート処理自体が失敗扱いになってしまうため、再起動予約と同じく
+    systemd-runで完全に切り離して非同期実行する。"""
+    check = subprocess.run(["dpkg", "-s", "exfatprogs"], capture_output=True)
+    if check.returncode == 0:
+        return
+    unit_name = f"pophug-exfatprogs-install-{int(time.time())}"
+    r = subprocess.run([
+        "systemd-run", "--collect", "--on-active=1",
+        f"--unit={unit_name}",
+        "/bin/sh", "-c",
+        "apt-get update && apt-get install -y exfatprogs",
+    ])
+    if r.returncode == 0:
+        print(f"exfatprogsのインストールをバックグラウンドで予約しました（{unit_name}）")
+    else:
+        print("exfatprogsのインストール予約に失敗しました（後で手動インストールしてください）")
 
 
 def main():
@@ -72,6 +110,9 @@ def main():
     if _install_helper(staging_dir, "pophug-hostname-setup", HOSTNAME_SETUP_DEST):
         print("pophug-hostname-setup updated")
 
+    if _install_helper(staging_dir, "pophug-usb-import", USB_IMPORT_DEST):
+        print("pophug-usb-import updated")
+
     unit_changed = False
 
     hostname_service_src = os.path.join(staging_dir, "pophug-hostname-setup.service")
@@ -86,9 +127,23 @@ def main():
         unit_changed = True
         print("pophug-signage.service updated")
 
+    usb_service_src = os.path.join(staging_dir, "pophug-usb-import@.service")
+    if os.path.isfile(usb_service_src):
+        shutil.copy(usb_service_src, USB_IMPORT_SERVICE_DEST)
+        unit_changed = True
+        print("pophug-usb-import@.service updated")
+
     if unit_changed:
         subprocess.run(["systemctl", "daemon-reload"])
         print("daemon-reload done")
+
+    udev_rules_src = os.path.join(staging_dir, "99-pophug-usb.rules")
+    if os.path.isfile(udev_rules_src):
+        shutil.copy(udev_rules_src, USB_UDEV_RULES_DEST)
+        subprocess.run(["udevadm", "control", "--reload-rules"])
+        print("99-pophug-usb.rules updated, udev rules reloaded")
+
+    _schedule_exfatprogs_install()
 
     # このスクリプト自身も元をたどれば pophug-signage.service から呼ばれた
     # 子プロセスなので、同じプロセスグループに属している。
