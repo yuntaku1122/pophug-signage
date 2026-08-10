@@ -36,6 +36,7 @@
 #   sudo chown root:root /usr/local/bin/pophug-update-apply
 # ============================================
 
+import filecmp
 import os
 import shutil
 import subprocess
@@ -53,14 +54,31 @@ USB_UDEV_RULES_DEST = "/etc/udev/rules.d/99-pophug-usb.rules"
 
 
 def _install_helper(staging_dir, filename, dest_path, mode=0o755):
-    """staging_dir内に該当ファイルがあれば、指定パスへ配置する共通処理"""
+    """staging_dir内に該当ファイルがあり、かつ配置先と内容が異なる場合のみ
+    コピーする（存在するだけでは何もしない）。staging_dirはpophug-signageの
+    常設リポジトリそのもの（APP_DIR）であり、対象ファイルは変更の有無に関わらず
+    「毎回必ず存在」するため、存在チェックだけで「更新した」とみなすと、
+    実際には内容が同じでも毎回コピー・自己再実行が発生してしまう
+    （pophug-update-apply自身の自己更新チェックでこれが無限ループを引き起こした
+    実績があるため、内容比較を必須にしている）。"""
     src = os.path.join(staging_dir, filename)
     if not os.path.isfile(src):
         return False
+    if os.path.isfile(dest_path) and filecmp.cmp(src, dest_path, shallow=False):
+        return False  # 内容が同一＝変更なし
     shutil.copy(src, dest_path)
     os.chmod(dest_path, mode)
     shutil.chown(dest_path, user="root", group="root")
     return True
+
+
+def _content_differs(src, dest_path):
+    """destが存在しない、または内容がsrcと異なるか（＝コピー・再読み込みが
+    本当に必要か）を返す。ユニットファイル・udevルールの不要な毎回コピーと
+    daemon-reload/udevadm再読み込みの連発を避けるために使う。"""
+    if not os.path.isfile(dest_path):
+        return True
+    return not filecmp.cmp(src, dest_path, shallow=False)
 
 
 def _schedule_exfatprogs_install():
@@ -138,19 +156,19 @@ def main():
     unit_changed = False
 
     hostname_service_src = os.path.join(staging_dir, "pophug-hostname-setup.service")
-    if os.path.isfile(hostname_service_src):
+    if os.path.isfile(hostname_service_src) and _content_differs(hostname_service_src, HOSTNAME_SERVICE_DEST):
         shutil.copy(hostname_service_src, HOSTNAME_SERVICE_DEST)
         unit_changed = True
         print("pophug-hostname-setup.service updated")
 
     signage_service_src = os.path.join(staging_dir, "pophug-signage.service")
-    if os.path.isfile(signage_service_src):
+    if os.path.isfile(signage_service_src) and _content_differs(signage_service_src, SIGNAGE_SERVICE_DEST):
         shutil.copy(signage_service_src, SIGNAGE_SERVICE_DEST)
         unit_changed = True
         print("pophug-signage.service updated")
 
     usb_service_src = os.path.join(staging_dir, "pophug-usb-import@.service")
-    if os.path.isfile(usb_service_src):
+    if os.path.isfile(usb_service_src) and _content_differs(usb_service_src, USB_IMPORT_SERVICE_DEST):
         shutil.copy(usb_service_src, USB_IMPORT_SERVICE_DEST)
         unit_changed = True
         print("pophug-usb-import@.service updated")
@@ -160,7 +178,7 @@ def main():
         print("daemon-reload done")
 
     udev_rules_src = os.path.join(staging_dir, "99-pophug-usb.rules")
-    if os.path.isfile(udev_rules_src):
+    if os.path.isfile(udev_rules_src) and _content_differs(udev_rules_src, USB_UDEV_RULES_DEST):
         shutil.copy(udev_rules_src, USB_UDEV_RULES_DEST)
         subprocess.run(["udevadm", "control", "--reload-rules"])
         print("99-pophug-usb.rules updated, udev rules reloaded")
