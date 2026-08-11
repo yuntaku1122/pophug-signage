@@ -1399,6 +1399,9 @@ def create_app(image_folder):
             count = int(m.group(1)) if m else 0
             print(f"[wifi] 保存済みWi-Fi情報を削除しました（{count}件）")
             signage_state.save_notice(image_folder, f"保存済みのWi-Fi情報を削除しました（{count}件）")
+            # 削除直後は接続状態が変わっている可能性が高いため、main.py側の
+            # 定期チェック（最大数分間隔）を待たず、その場で再判定させる
+            signage_state.request_network_recheck(image_folder)
             return {"status": "ok", "count": count}
         error_message = err or out or "不明なエラー"
         print(f"[wifi] 保存済みWi-Fi情報の削除に失敗: {error_message}")

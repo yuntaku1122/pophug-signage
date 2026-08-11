@@ -362,3 +362,36 @@ def notice_mtime(image_folder):
         return os.path.getmtime(path)
     except OSError:
         return None
+
+
+# ---------------- ネットワーク状態の即時再判定要求（ワンショット） ----------------
+# main.py側の「知っているWi-Fiに繋がっているか」の自動判定は、負荷を抑えるため
+# 数十秒〜数分間隔でしか行っていない（STANDALONE_CHECK_INTERVAL）。そのため、
+# Web側で保存済みWi-Fi情報を削除するなど接続状態が変わりうる操作をした直後は、
+# main.py側のフラグ（standalone_active等）がまだ古い状態のままになる時間帯が
+# 生まれてしまう。この間にボタンが押されると、実際には未接続なのに「接続中」
+# 前提の画面を出してしまう不具合があったため、そうした操作の直後にこの関数を
+# 呼んで images/.network_recheck.json の更新時刻を進めておく。main.py側はこの
+# 更新時刻の変化だけを検知して、定期チェックを待たずにその場で再判定する
+# （中身は使わない、notice_mtime等と同じワンショット信号のパターン）。
+
+def _network_recheck_path(image_folder):
+    return os.path.join(image_folder, ".network_recheck.json")
+
+
+def request_network_recheck(image_folder):
+    """接続状態が変わった可能性がある操作（保存済みWi-Fi情報の削除など）の直後に呼ぶ。
+    main.py側に定期チェックを待たない即時の再判定を促すだけで、実際の判定・
+    アクセスポイント起動などはmain.py側で行う。"""
+    path = _network_recheck_path(image_folder)
+    with _lock:
+        _atomic_write_json(path, {"ts": time.time()})
+
+
+def network_recheck_mtime(image_folder):
+    """再判定要求ファイルの更新時刻だけを返す（存在しなければNone）"""
+    path = _network_recheck_path(image_folder)
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None

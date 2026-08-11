@@ -17,7 +17,7 @@ from datetime import datetime
 from config import *
 from signage_state import (load_hidden, hidden_mtime, load_settings, settings_mtime,
                             load_priority, PRIORITY_TAGS, load_notice, notice_mtime,
-                            load_pinned, save_hidden)
+                            load_pinned, save_hidden, network_recheck_mtime)
 from version import __version__
 import wifi_setup
 import sd_watchdog
@@ -168,6 +168,9 @@ class PopSignage:
         self.standalone_active = False   # 自分専用APを常時ホストしているか（画面には出ない裏方の状態）
         # 起動直後は既知のWi-Fiへの接続を試す猶予を置いてから最初の判定を行う
         self.last_standalone_check_time = time.time() - STANDALONE_CHECK_INTERVAL + STANDALONE_BOOT_GRACE_SECONDS
+        # Web側で保存済みWi-Fi情報を削除した等の「即時再判定要求」の検知用。
+        # 起動時点で既にファイルが存在していても前回までの古い要求なので無視する
+        self.last_network_recheck_mtime = network_recheck_mtime(IMAGE_FOLDER)
 
         self.load_pop_images(initial=True)
 
@@ -564,6 +567,21 @@ class PopSignage:
             self._hide_qr()
             log("QRコード非表示（ボタン再押下）")
             return
+
+        # standalone_activeフラグは定期チェック（最大STANDALONE_CHECK_INTERVAL秒間隔）
+        # でしか更新されないため、Web側でWi-Fi情報を削除した直後などはフラグが
+        # まだ「未接続」を反映しておらず、本来スタンドアロン用の案内画面を出す
+        # べき場面で通常のQR（＝接続中である前提の画面）を誤って表示してしまう
+        # ことがあった。ボタンが押されたこのタイミングで実際の接続状態を
+        # 直接（read-onlyの軽い確認で）取り直し、未接続なら定期チェックを
+        # 待たずその場でスタンドアロンモードへ移行してから案内画面を出す。
+        if (not self.standalone_active and STANDALONE_AUTO_ENABLED
+                and not wifi_setup.is_client_connected()):
+            log("QR短押し時点で外部Wi-Fiへの接続が確認できないため、"
+                "即座にスタンドアロンモードへの移行を試みます")
+            self._enter_standalone_mode()
+            self.last_standalone_check_time = time.time()
+
         if self.standalone_active:
             log("スタンドアロンモード中のため、QR短押しでも接続手順の案内画面を表示します")
             self.enter_wifi_setup_mode()
@@ -1224,6 +1242,18 @@ class PopSignage:
                             # 通知ファイルが削除された（USBメモリー取り外し検知等）
                             # ＝表示中のsticky通知を即座に消す合図
                             self._hide_notice()
+
+                    # Web側で保存済みWi-Fi情報を削除するなど、接続状態が変わりうる
+                    # 操作があった直後の合図。standalone_active等のフラグは最大
+                    # STANDALONE_CHECK_INTERVAL秒古い可能性があるため、この合図を
+                    # 検知したら定期チェックを待たず、このフレーム内で即座に
+                    # 再判定させる（下のスタンドアロン自動移行チェックへ委ねる）
+                    current_network_recheck_mtime = network_recheck_mtime(IMAGE_FOLDER)
+                    if current_network_recheck_mtime != self.last_network_recheck_mtime:
+                        self.last_network_recheck_mtime = current_network_recheck_mtime
+                        if not self.wifi_setup_active and not self.standalone_active:
+                            log("ネットワーク状態の即時再判定要求を検知しました")
+                            self.last_standalone_check_time = now - STANDALONE_CHECK_INTERVAL
 
                 if now - self.last_scan_time >= RESCAN_INTERVAL:
                     self.last_scan_time = now
