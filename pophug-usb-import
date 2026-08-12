@@ -504,12 +504,46 @@ def parse_settings_text_file(path):
     return raw
 
 
+def _describe_settings_issues(errors, unknown, max_items=5):
+    """設定ファイルのうち無視された項目を、画面通知用に人が読める形へ整形する。
+    件数だけでなく「どのキーが」「なぜ」無視されたのかがその場で（USBを挿した
+    本体の画面だけを見て）分かるようにする。複数店舗をUSBで回る運用では、
+    SSHでログを見に行く前提にはできないため。項目が多すぎる場合は主要な
+    ものだけ示し、残りは件数でまとめる（通知バナーが際限なく長くならないため）。
+    戻り値: 説明文（無視した項目が無ければ空文字列）"""
+    parts = []
+    shown = 0
+    for key, reason in errors:
+        if shown >= max_items:
+            break
+        parts.append(f"{key}（{reason}）")
+        shown += 1
+    for key in unknown:
+        if shown >= max_items:
+            break
+        parts.append(f"{key}（見覚えのないキーです）")
+        shown += 1
+
+    total = len(errors) + len(unknown)
+    if not parts:
+        return ""
+    text = "反映されなかった項目：" + "、".join(parts)
+    if total > shown:
+        text += f" 他{total - shown}件"
+    return text
+
+
 def find_and_apply_settings_file(source_dir, image_folder):
     """USBのトップレベルにある設定ファイル(pophug-settings.txt、大文字小文字は
     区別しない)を探し、有効な項目だけをimages/.settings.jsonへ即座に自動適用する。
     ファイルの一部の行に誤りがあっても、有効な行だけを適用し、無効な行は
     個別にスキップしてログへ警告を残す（1箇所のタイプミスで全体が反映され
-    ないと、手打ちのテキストファイルでは扱いづらいため）。
+    ないと、手打ちのテキストファイルでは扱いづらいため）。無効だった項目は
+    保存されず、その設定は元の値のまま変わらない。
+    戻り値のメッセージには、実際に変更した項目（キー=値）と、無視した項目
+    （キーと理由）の両方を具体的に含める。本体画面の通知だけを見て
+    「何が変わり、何が変わらなかったか（＝直すべき箇所）」が分かるようにする
+    ため（SSHでログを見に行く前提にはできない運用のため）。
     戻り値: 適用結果を表すユーザー向けメッセージ、またはファイルが無ければNone。"""
     if signage_state is None:
         return None
@@ -541,18 +575,22 @@ def find_and_apply_settings_file(source_dir, image_folder):
     for key, reason in errors:
         log(f"設定ファイル（{name}）: {key} の値が不正なため無視します（{reason}）: {raw.get(key)!r}")
 
+    issue_desc = _describe_settings_issues(errors, unknown)
+
     if not valid:
-        return f"設定ファイル（{name}）に反映できる項目がありませんでした"
+        msg = f"設定ファイル（{name}）に反映できる項目がありませんでした"
+        if issue_desc:
+            msg += f"。{issue_desc}"
+        return msg
 
     signage_state.save_settings(image_folder, valid)
 
     applied_desc = "、".join(f"{k}={v}" for k, v in valid.items())
     log(f"設定ファイル（{name}）から{len(valid)}件を適用しました: {applied_desc}")
 
-    skipped = len(errors) + len(unknown)
-    msg = f"設定({len(valid)}件)を適用しました"
-    if skipped:
-        msg += f"（{skipped}件は無視: 値が不正または未知のキー）"
+    msg = f"設定ファイルを適用しました：{applied_desc}"
+    if issue_desc:
+        msg += f"。{issue_desc}"
     return msg
 
 
