@@ -522,8 +522,10 @@ class PopSignage:
         """保留中のUSBアップデートをボタン長押しで確定し、適用する。
         適用処理そのものはオンラインOTAと全く同じ検証・バックアップ・
         ロールバック経路（update_check.apply_update_from_zip）を通るため、
-        安全性は同等。成功時はこの後サービスごと再起動される想定なので、
-        以降の見た目の更新は不要（プロセスごと終了する）。失敗時はロールバック
+        安全性は同等。成功時はこの後サービスごと再起動される想定。それまでの
+        数秒間は_usb_update_applyingフラグを見てrun()側がdraw_usb_update_applying_screen
+        を毎フレーム描画し続けるため、途中でスライドショーや古い通知・バッジに
+        画面が戻って「失敗した？」と誤解されることはない。失敗時はロールバック
         済みで元のバージョンのまま動き続けるので、エラー内容を通知して
         保留状態だけ解除する。多重起動防止は呼び出し元(_handle_usb_update_button)
         で行っている。"""
@@ -534,21 +536,6 @@ class PopSignage:
 
         self._hide_qr()
         self.manual_active = False
-
-        # 適用中である旨を1フレーム描画してからflipする（シャットダウン処理と同じ方式）
-        self.canvas.fill((10, 10, 10))
-        surf = self._render_fit_text(
-            f"アップデートを適用しています（v{version}）...お待ちください",
-            self.canvas.get_width() - 48, start_size=26, min_size=14, color=(150, 220, 255))
-        self.canvas.blit(surf, (
-            self.canvas.get_width() // 2 - surf.get_width() // 2,
-            self.canvas.get_height() // 2 - surf.get_height() // 2))
-        if ROTATE_SCREEN:
-            rotated = pygame.transform.rotate(self.canvas, -ROTATE_SCREEN)
-            self.screen.blit(rotated, (0, 0))
-        else:
-            self.screen.blit(self.canvas, (0, 0))
-        pygame.display.flip()
 
         def do_apply():
             ok, msg = update_check.apply_update_from_zip(zip_path, version)
@@ -755,7 +742,10 @@ class PopSignage:
         仕組みにしている。デジタルサイネージ本来の役割（スライドショー表示）を
         妨げないよう、画面を占有せず控えめな帯だけにとどめる。
         ボタン長押し中はdraw_button_hold_overlayの方で進捗を見せるので、
-        二重表示を避けるためここでは何も描かない。"""
+        二重表示を避けるためここでは何も描かない。
+        適用処理が既に確定・進行中(_usb_update_applying)の間は
+        draw_usb_update_applying_screenが画面を専有するので、こちらは呼ばれない
+        （run()側の分岐で切り替えている）。"""
         if not self.usb_update_pending or self._button_press_start is not None:
             return
 
@@ -772,6 +762,30 @@ class PopSignage:
         bar.fill((255, 205, 80))
         bar.blit(surf, (max(0, (w - surf.get_width()) // 2), pad_y))
         self.canvas.blit(bar, (0, self.canvas.get_height() - bar_h))
+
+    def draw_usb_update_applying_screen(self):
+        """USBアップデートの適用処理が確定・進行中の間、毎フレーム描画する
+        専有画面。以前はこの表示を確定した瞬間に1回だけ描画してflipしていたが、
+        その直後にrun()側の通常描画（スライドショー＋「アップデート待機中」バッジ＋
+        USB挿入時の通知バナー）に次のフレームで上書きされてしまい、あたかも
+        アップデートが失敗したかのように見える不具合があった（実際には裏で
+        適用処理が進行中だっただけ）。この関数をwifi_setup_active/manual_activeと
+        同様に「専有画面」としてrun()側の分岐に組み込み、適用処理が終わる
+        （＝プロセスごと再起動される）まで毎フレーム描画し続けることで、
+        古い画面が再表示されて誤解を招くことがないようにしている。"""
+        version = self.usb_update_pending.get("version", "?") if self.usb_update_pending else "?"
+        self.canvas.fill((10, 10, 10))
+        surf = self._render_fit_text(
+            f"アップデートを適用しています（v{version}）...",
+            self.canvas.get_width() - 48, start_size=28, min_size=14, color=(150, 220, 255))
+        sub = self._render_fit_text(
+            "しばらくお待ちください。自動的に再起動します（ボタン操作は不要です）",
+            self.canvas.get_width() - 48, start_size=18, min_size=12, color=(200, 200, 200))
+        total_h = surf.get_height() + 16 + sub.get_height()
+        base_y = self.canvas.get_height() // 2 - total_h // 2
+        self.canvas.blit(surf, (self.canvas.get_width() // 2 - surf.get_width() // 2, base_y))
+        self.canvas.blit(sub, (self.canvas.get_width() // 2 - sub.get_width() // 2,
+                                base_y + surf.get_height() + 16))
 
     def show_qr_code(self):
         """アップロードページのURLをQRコードとして生成し、画面に一定時間オーバーレイ表示する。
@@ -1434,7 +1448,13 @@ class PopSignage:
                     if not wifi_setup.is_client_connected():
                         self._enter_standalone_mode()
 
-                if self.wifi_setup_active:
+                if self._usb_update_applying:
+                    # USBアップデートの適用処理が進行中（ボタン長押しで確定済み、
+                    # まだサービス再起動前）。他の何より優先して専有画面を出し続け、
+                    # スライドショーや古い通知・バッジが再表示されて
+                    # 「失敗したのでは」と誤解されることのないようにする
+                    self.draw_usb_update_applying_screen()
+                elif self.wifi_setup_active:
                     self.draw_wifi_setup_screen()
                 elif self.manual_active:
                     self.draw_manual_screen()
