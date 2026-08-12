@@ -100,3 +100,15 @@ SHUTDOWN_HOLD_SECONDS = 10           # QRボタンをこの秒数以上長押し
 # アップデート機能設定
 # GitHubのReleasesを更新配信先として使う。"ユーザー名/リポジトリ名"の形式。
 GITHUB_REPO = "yuntaku1122/pophug-signage"
+
+# USBオフラインアップデート設定
+# 出先など、Wi-Fiが無くWeb設定画面のオンラインアップデートが使えない状況でも、
+# GitHub Releaseの「Source code (zip)」をそのままUSBメモリーのルートに
+# 置くだけで更新できるようにする機能（ファイル名のリネームは不要。
+# version.py/main.py/signage_state.pyが単一のトップフォルダに揃っているかで
+# 判定するため）。誤って古い/無関係なUSBを挿してしまった時の誤爆を防ぐため、
+# 挿しただけでは適用せず「検出・ステージング」だけを行い（pophug-usb-import）、
+# 実際の適用は本体ボタンの長押しで明示的に確定してもらう2段階方式にしている。
+USB_UPDATE_CONFIRM_HOLD_SECONDS = 8  # 保留中のUSBアップデートを確定するまでの長押し秒数
+                                      # （保留中はボタンの意味が丸ごとこれに切り替わるため、
+                                      #   他の長押し秒数と衝突しないよう独立した値でよい）

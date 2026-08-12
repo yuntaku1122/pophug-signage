@@ -17,10 +17,13 @@ from datetime import datetime
 from config import *
 from signage_state import (load_hidden, hidden_mtime, load_settings, settings_mtime,
                             load_priority, PRIORITY_TAGS, load_notice, notice_mtime,
-                            load_pinned, save_hidden, network_recheck_mtime)
+                            load_pinned, save_hidden, network_recheck_mtime,
+                            load_usb_update_pending, usb_update_pending_mtime,
+                            clear_usb_update_pending)
 from version import __version__
 import wifi_setup
 import sd_watchdog
+import update_check
 from manual import MANUAL_PAGES
 
 try:
@@ -171,6 +174,15 @@ class PopSignage:
         # Web側で保存済みWi-Fi情報を削除した等の「即時再判定要求」の検知用。
         # 起動時点で既にファイルが存在していても前回までの古い要求なので無視する
         self.last_network_recheck_mtime = network_recheck_mtime(IMAGE_FOLDER)
+
+        # USBオフラインアップデート：保留中（本体ボタンの長押しでの確定待ち）の
+        # パッケージ情報。ネットワーク再判定要求と違い、こちらは「起動時点で
+        # 既にファイルが存在していれば、それも尊重して読み込む」。前回起動中に
+        # USBでパッケージを検出したものの、確定する前に再起動されたケースでも
+        # 確定待ちの状態を引き継げるようにするため。
+        self.usb_update_pending = load_usb_update_pending(IMAGE_FOLDER)
+        self.last_usb_update_pending_mtime = usb_update_pending_mtime(IMAGE_FOLDER)
+        self._usb_update_applying = False  # 適用処理の多重起動防止
 
         self.load_pop_images(initial=True)
 
@@ -446,6 +458,13 @@ class PopSignage:
             self.toggle_manual()
             return
 
+        if self.usb_update_pending:
+            # USBアップデートパッケージが確定待ちの間は、ボタンの意味を
+            # 丸ごと「適用の確定/見送り」に切り替える（通常のQR表示等の
+            # ラダーとは独立させ、誤って別の操作と混同しないようにするため）
+            self._handle_usb_update_button(held_seconds)
+            return
+
         if held_seconds >= SHUTDOWN_HOLD_SECONDS:
             self._trigger_button_shutdown()
         elif held_seconds >= RESET_DISPLAY_HOLD_SECONDS:
@@ -481,6 +500,79 @@ class PopSignage:
         log(f"ボタン長押しにより表示をリセットしました"
             f"（固定表示{len(shown)}枚のみ表示、{len(hidden)}枚を非表示化。画像データは削除していません）")
         self._show_notice(f"表示をリセットしました（固定表示{len(shown)}枚のみ表示中）")
+
+    def _handle_usb_update_button(self, held_seconds):
+        """USBアップデートパッケージが確定待ちの間のボタン処理。
+        USB_UPDATE_CONFIRM_HOLD_SECONDS秒以上の長押しだけを「確定・適用」とし、
+        それ未満（短押しも含む）は全て「見送り（キャンセル）」として扱う。
+        誤操作防止のため、確定には明確な長押しを必須にしている。"""
+        pending = self.usb_update_pending
+        if self._usb_update_applying:
+            # 既に適用処理が進行中の間は、確定・見送りどちらの操作も受け付けない
+            # （見送り操作でステージング済みzipを消してしまうと、進行中の適用処理が
+            # 参照しているファイルが無くなり中途半端な状態になりかねないため）
+            log("USBアップデートは適用処理中のため、ボタン操作を無視しました")
+            return
+        if held_seconds >= USB_UPDATE_CONFIRM_HOLD_SECONDS:
+            self._confirm_usb_update(pending)
+        else:
+            self._dismiss_usb_update(pending, reason="ボタン短押しのため見送り")
+
+    def _confirm_usb_update(self, pending):
+        """保留中のUSBアップデートをボタン長押しで確定し、適用する。
+        適用処理そのものはオンラインOTAと全く同じ検証・バックアップ・
+        ロールバック経路（update_check.apply_update_from_zip）を通るため、
+        安全性は同等。成功時はこの後サービスごと再起動される想定なので、
+        以降の見た目の更新は不要（プロセスごと終了する）。失敗時はロールバック
+        済みで元のバージョンのまま動き続けるので、エラー内容を通知して
+        保留状態だけ解除する。多重起動防止は呼び出し元(_handle_usb_update_button)
+        で行っている。"""
+        version = pending.get("version", "?")
+        zip_path = pending.get("zip_path")
+        self._usb_update_applying = True
+        log(f"USBアップデートの適用をボタン長押しで確定しました: v{version}")
+
+        self._hide_qr()
+        self.manual_active = False
+
+        # 適用中である旨を1フレーム描画してからflipする（シャットダウン処理と同じ方式）
+        self.canvas.fill((10, 10, 10))
+        surf = self._render_fit_text(
+            f"アップデートを適用しています（v{version}）...お待ちください",
+            self.canvas.get_width() - 48, start_size=26, min_size=14, color=(150, 220, 255))
+        self.canvas.blit(surf, (
+            self.canvas.get_width() // 2 - surf.get_width() // 2,
+            self.canvas.get_height() // 2 - surf.get_height() // 2))
+        if ROTATE_SCREEN:
+            rotated = pygame.transform.rotate(self.canvas, -ROTATE_SCREEN)
+            self.screen.blit(rotated, (0, 0))
+        else:
+            self.screen.blit(self.canvas, (0, 0))
+        pygame.display.flip()
+
+        def do_apply():
+            ok, msg = update_check.apply_update_from_zip(zip_path, version)
+            if not ok:
+                # 成功時はここに到達する前にサービスごと再起動される想定。
+                # 到達した＝失敗（ロールバック済みで元のバージョンのまま動作継続）
+                log(f"USBアップデート適用に失敗しました: {msg}")
+                clear_usb_update_pending(IMAGE_FOLDER)
+                self._usb_update_applying = False
+                self._show_notice(f"USBアップデートの適用に失敗しました（{msg}）", sticky=True)
+
+        threading.Thread(target=do_apply, daemon=True).start()
+
+    def _dismiss_usb_update(self, pending, reason):
+        """保留中のUSBアップデートを見送る（適用しない）。ステージング済みの
+        zip本体も削除するため、SDカードの空き容量を圧迫したままにならない。
+        次回同じUSBを挿し直せば、再度検出・確定待ちにできる。"""
+        version = pending.get("version", "?")
+        log(f"USBアップデート（v{version}）を見送りました: {reason}")
+        clear_usb_update_pending(IMAGE_FOLDER)
+        self.usb_update_pending = None
+        self._show_notice(
+            f"USBアップデート（v{version}）の適用を見送りました。"
+            f"再度適用するにはUSBメモリーを挿し直してください")
 
     def _trigger_button_shutdown(self):
         """物理ボタンの長押しでシャットダウンを実行する（Web版と同じsudoersの許可を利用）"""
@@ -527,7 +619,18 @@ class PopSignage:
         overlay.fill((10, 10, 10))
         self.canvas.blit(overlay, (0, 0))
 
-        if held >= SHUTDOWN_HOLD_SECONDS:
+        if self.usb_update_pending:
+            # 保留中のUSBアップデートがある間は、通常のラダー（取扱説明～
+            # シャットダウン）を丸ごと無視し、確定/見送りの進捗だけを見せる
+            version = self.usb_update_pending.get("version", "?")
+            if held >= USB_UPDATE_CONFIRM_HOLD_SECONDS:
+                text = f"離すとアップデートを適用します（v{version}）"
+                color = (150, 220, 255)
+            else:
+                remaining = USB_UPDATE_CONFIRM_HOLD_SECONDS - held
+                text = f"長押し中...あと{remaining:.1f}秒でアップデート適用（v{version}）（今離すと見送り）"
+                color = (255, 210, 120)
+        elif held >= SHUTDOWN_HOLD_SECONDS:
             text = "離すとシャットダウンします"
             color = (255, 90, 90)
         elif held >= RESET_DISPLAY_HOLD_SECONDS:
@@ -644,6 +747,31 @@ class PopSignage:
         for surf in self.notice_lines:
             self.canvas.blit(surf, (box_x + box_w // 2 - surf.get_width() // 2, y))
             y += surf.get_height() + line_gap
+
+    def draw_usb_update_badge(self):
+        """USBアップデートパッケージが確定待ちの間、画面下部に控えめなバッジを
+        常時表示する。通知バナー(draw_notice_overlay)と違い、確定・見送りされる
+        まで表示時間の上限なく出続けるべきものなので、あえて別の独立した
+        仕組みにしている。デジタルサイネージ本来の役割（スライドショー表示）を
+        妨げないよう、画面を占有せず控えめな帯だけにとどめる。
+        ボタン長押し中はdraw_button_hold_overlayの方で進捗を見せるので、
+        二重表示を避けるためここでは何も描かない。"""
+        if not self.usb_update_pending or self._button_press_start is not None:
+            return
+
+        version = self.usb_update_pending.get("version", "?")
+        text = f"アップデート待機中 v{version}（本体ボタン{USB_UPDATE_CONFIRM_HOLD_SECONDS}秒長押しで適用）"
+        font = get_japanese_font(18)
+        surf = font.render(text, True, (30, 30, 30))
+
+        w = self.canvas.get_width()
+        pad_x, pad_y = 14, 8
+        bar_h = surf.get_height() + pad_y * 2
+        bar = pygame.Surface((w, bar_h))
+        bar.set_alpha(225)
+        bar.fill((255, 205, 80))
+        bar.blit(surf, (max(0, (w - surf.get_width()) // 2), pad_y))
+        self.canvas.blit(bar, (0, self.canvas.get_height() - bar_h))
 
     def show_qr_code(self):
         """アップロードページのURLをQRコードとして生成し、画面に一定時間オーバーレイ表示する。
@@ -1255,6 +1383,24 @@ class PopSignage:
                             log("ネットワーク状態の即時再判定要求を検知しました")
                             self.last_standalone_check_time = now - STANDALONE_CHECK_INTERVAL
 
+                    # USBオフラインアップデート：USB挿入時にpophug-usb-importが
+                    # 検出・ステージングした（.usb_update_pending.json）、または
+                    # ボタン操作で確定・見送りされて消えた、のどちらかの変化を検知する。
+                    # 適用処理中(_usb_update_applying)は、その処理自身がファイルを
+                    # 削除するタイミングと重なるため、ここでの読み直しは行わない
+                    # （既にメモリ上のself.usb_update_pendingで処理を続けているため不要）。
+                    current_usb_update_pending_mtime = usb_update_pending_mtime(IMAGE_FOLDER)
+                    if (current_usb_update_pending_mtime != self.last_usb_update_pending_mtime
+                            and not self._usb_update_applying):
+                        self.last_usb_update_pending_mtime = current_usb_update_pending_mtime
+                        self.usb_update_pending = load_usb_update_pending(IMAGE_FOLDER)
+                        if self.usb_update_pending:
+                            log(f"USBアップデートパッケージを検出しました: "
+                                f"v{self.usb_update_pending.get('version')}"
+                                f"（現在v{self.usb_update_pending.get('current_version')}）。"
+                                f"本体ボタンを{USB_UPDATE_CONFIRM_HOLD_SECONDS}秒以上"
+                                f"長押しすると適用します")
+
                 if now - self.last_scan_time >= RESCAN_INTERVAL:
                     self.last_scan_time = now
                     self.load_pop_images()
@@ -1296,6 +1442,7 @@ class PopSignage:
                     self.draw_pop_mode()
                     if self.qr_active:
                         self.draw_qr_overlay()
+                    self.draw_usb_update_badge()
                     self.draw_notice_overlay()
                     self.draw_button_hold_overlay()
 

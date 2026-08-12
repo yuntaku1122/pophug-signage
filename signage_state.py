@@ -8,6 +8,7 @@
 
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -391,6 +392,68 @@ def request_network_recheck(image_folder):
 def network_recheck_mtime(image_folder):
     """再判定要求ファイルの更新時刻だけを返す（存在しなければNone）"""
     path = _network_recheck_path(image_folder)
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+# ---------------- USBオフラインアップデート（検出・確定待ち状態） ----------------
+# ネットワークが無い出先でも、GitHub Releaseのsource code(zip)をそのまま
+# USBメモリーのルートに置いておけば、挿した時に検出だけを行い、
+# images/.usb_update/pending.zip へコピーしておく（root権限のpophug-usb-import
+# が実行。詳細はそちらのコメント参照）。安全のため自動適用はせず、実際の適用は
+# 本体ボタンの長押しで明示的に確定してもらう2段階方式にしている。
+# main.py側は images/.usb_update_pending.json の更新時刻をポーリングして、
+# ボタン長押し時の確定待ち画面・バッジ表示の要否を判断する。
+
+def _usb_update_pending_path(image_folder):
+    return os.path.join(image_folder, ".usb_update_pending.json")
+
+
+def save_usb_update_pending(image_folder, version, zip_path, current_version):
+    """USBアップデートパッケージを検出・ステージングした直後にpophug-usb-importから呼ぶ。"""
+    data = {
+        "version": version,
+        "zip_path": zip_path,
+        "current_version": current_version,
+        "detected_at": time.time(),
+    }
+    with _lock:
+        _atomic_write_json(_usb_update_pending_path(image_folder), data)
+
+
+def load_usb_update_pending(image_folder):
+    """保留中のUSBアップデート情報を返す（無ければNone）。
+    main.py側が起動時・定期ポーリングの両方でこれを読み、ボタン長押し時の
+    挙動やバッジ表示を切り替える。"""
+    path = _usb_update_pending_path(image_folder)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def clear_usb_update_pending(image_folder):
+    """適用確定・見送りのどちらの場合でも、保留状態を解除する時に呼ぶ。
+    ステージング済みのzip本体（images/.usb_update/以下）も合わせて削除し、
+    SDカードの空き容量を圧迫したままにしないようにする。"""
+    path = _usb_update_pending_path(image_folder)
+    with _lock:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    staging_dir = os.path.join(image_folder, ".usb_update")
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def usb_update_pending_mtime(image_folder):
+    """保留状態ファイルの更新時刻だけを返す（存在しなければNone）。
+    ファイルが「作られた」時だけでなく「消された」時（適用確定・見送り後）も
+    mtimeがNoneに変わることで検知できる（notice_mtime等と同じパターン）。"""
+    path = _usb_update_pending_path(image_folder)
     try:
         return os.path.getmtime(path)
     except OSError:

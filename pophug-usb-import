@@ -2,13 +2,14 @@
 # ============================================
 # pophug-usb-import
 #
-# USBメモリー挿入時に自動実行される、root権限が必要な画像取り込み処理。
-# udevルール(99-pophug-usb.rules)経由で、systemdテンプレートユニット
-# (pophug-usb-import@.service)としてroot権限で起動される。
-# ネットワーク経由の入力は一切受け付けず、起動元はカーネルのudevイベントのみ
-# （pophug-netctl等のようにWebサーバーからsudo経由で呼ばれるものではない）。
+# USBメモリー挿入時に自動実行される、root権限が必要な画像取り込み・
+# アップデートパッケージ検出処理。udevルール(99-pophug-usb.rules)経由で、
+# systemdテンプレートユニット(pophug-usb-import@.service)としてroot権限で
+# 起動される。ネットワーク経由の入力は一切受け付けず、起動元はカーネルの
+# udevイベントのみ（pophug-netctl等のようにWebサーバーからsudo経由で
+# 呼ばれるものではない）。
 #
-# 処理の流れ:
+# 処理の流れ（画像取り込み）:
 #   1. 対象パーティションを読み取り専用でマウント（USB側は一切変更しない）
 #   2. トップレベル（サブフォルダは対象外）の画像ファイルだけを走査
 #      （ドットファイル・拡張子と中身が一致しないファイルは除外。macOSでUSBメモリーを
@@ -20,9 +21,23 @@
 #      （images/.pinned.json。優先表示等と同じくWeb設定画面からも切替可能）
 #   5. 今回取り込んだ画像・固定表示画像 以外の既存画像を一括で非表示化
 #      （＝USB取り込み後は、そのUSBの内容＋固定表示画像だけが表示される）
+#
+# 処理の流れ（USBオフラインアップデート、画像取り込みとは独立して毎回行う）:
+#   a. トップレベルのzipファイルの中から、pophug-signageのアップデート
+#      パッケージ（GitHub Releaseの「Source code (zip)」をそのまま置いたもの。
+#      リネーム不要）らしきものを探す（version.py/main.py/signage_state.pyが
+#      単一のトップフォルダに揃っているかで判定）
+#   b. 現在実行中のバージョンより新しければ、images/.usb_update/pending.zip
+#      へコピーし、images/.usb_update_pending.json に検出結果を記録する
+#      （実際の適用はまだ行わない。安全のため自動適用はせず、本体ボタンの
+#      長押しで明示的に確定してもらう2段階方式。main.py側で処理される）
+#
+#   共通の後処理:
 #   6. 本体画面に完了通知（images/.notice.json、USBを抜くまで表示され続ける）を出し、
 #      アンマウント
 #   7. USBメモリーが抜かれたら（udevのremoveイベント）、表示中の通知を消す
+#      （※アップデート確定待ちのバッジ表示は通知とは別の独立した仕組みのため、
+#      USBを抜いても消えない＝USBを抜いた後でもボタン長押しで確定できる）
 #
 # 使い方:
 #   pophug-usb-import <デバイス名-add 例: sda1-add>    …挿入時
@@ -48,6 +63,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 
 # main.py・upload_server.pyと同じ画像フォルダ（pophug-signage.serviceの
 # WorkingDirectoryを基準とした ./images と同一パスになるよう固定で指定する。
@@ -82,11 +98,23 @@ try:
 except ImportError:
     signage_state = None  # インストール直後などrepo未配置の場合は後段でエラー終了する
 
+# update_check.py（標準ライブラリのみに依存、importするだけではネットワークにも
+# アクセスしない）から、バージョン文字列の比較ロジック(_parse_version)と
+# 現在のバージョン(__version__)を再利用する。USBアップデートパッケージの
+# バージョン判定を、オンラインOTAと同じ基準で行うため。
+try:
+    import update_check
+except ImportError:
+    update_check = None  # 未配置の場合はUSBアップデート検出機能だけ無効化する
+
 
 STATE_FILENAMES = (
     ".hidden.json", ".pinned.json", ".priority.json",
     ".settings.json", ".notice.json", ".usb_imported.json",
+    ".usb_update_pending.json",
 )
+
+UPDATE_ZIP_REQUIRED_FILES = ("version.py", "main.py", "signage_state.py")
 
 
 def log(message):
@@ -122,12 +150,22 @@ def fix_ownership(image_folder):
     except OSError:
         pass
 
+    # USBアップデートのステージング先(images/.usb_update/pending.zip)は
+    # フォルダごとroot所有で作られるため、フォルダ自体とその中身も対象に含める
+    update_staging_dir = os.path.join(image_folder, ".usb_update")
+    if os.path.isdir(update_staging_dir):
+        targets.append(update_staging_dir)
+        try:
+            targets += [os.path.join(update_staging_dir, f) for f in os.listdir(update_staging_dir)]
+        except OSError:
+            pass
+
     for path in targets:
         if not os.path.exists(path):
             continue
         try:
             shutil.chown(path, user=POPHUG_USER, group=POPHUG_GROUP)
-            os.chmod(path, 0o644)
+            os.chmod(path, 0o755 if os.path.isdir(path) else 0o644)
         except (LookupError, PermissionError, OSError) as e:
             log(f"所有者の復元に失敗しました（無視して続行）: {path}: {e}")
 
@@ -334,6 +372,89 @@ def build_notice_message(result):
     return msg
 
 
+# ---------------- USBオフラインアップデートパッケージの検出・ステージング ----------------
+# GitHub Releaseの「Source code (zip)」をそのままUSBのルートに置いておくだけで
+# 検出できるようにする（ファイル名のリネームは要求しない）。安全のため、
+# ここでは検出とローカルへのコピー（ステージング）だけを行い、実際の適用は
+# 一切行わない。適用は本体ボタンの長押しでmain.py側が確定した時に、
+# update_check.apply_update_from_zip()経由で行われる。
+
+def _inspect_update_zip(path):
+    """zipファイルがpophug-signageのアップデートパッケージ（GitHub Releaseの
+    source code zipそのもの）らしいかどうかを確認し、バージョン文字列を取り出す。
+    それらしくない場合（構成が違う、version.pyが読めない等）はNoneを返す。
+    無関係なzipファイルが同じUSBに入っていても、単に無視されるだけで安全。"""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+            top_dirs = set(n.split("/", 1)[0] for n in names if "/" in n)
+            if len(top_dirs) != 1:
+                return None
+            top = next(iter(top_dirs))
+            required = {f"{top}/{fn}" for fn in UPDATE_ZIP_REQUIRED_FILES}
+            if not required.issubset(set(names)):
+                return None
+            with zf.open(f"{top}/version.py") as vf:
+                content = vf.read().decode("utf-8", errors="replace")
+    except (zipfile.BadZipFile, OSError, KeyError):
+        return None
+
+    m = re.search(r'__version__\s*=\s*["\']([\d.]+)["\']', content)
+    if not m:
+        return None
+    return {"version": m.group(1)}
+
+
+def find_and_stage_update_package(source_dir, image_folder):
+    """USBのトップレベルにあるzipファイルの中から、アップデートパッケージらしき
+    ものを探す。見つかった場合は images/.usb_update/pending.zip へコピーし、
+    images/.usb_update_pending.json に検出結果を書き込む（実際の適用はしない、
+    本体ボタンの長押しで確定されるまで待つ）。現在実行中のバージョン以下の
+    パッケージは無視する（巻き戻り防止。オンラインOTAと同じ方針）。
+    戻り値: 検出・ステージングできた場合はユーザー向けメッセージ、
+            何もしなかった場合はNone"""
+    if update_check is None:
+        return None  # update_check.pyが未配置の環境では機能自体を無効化する
+
+    try:
+        entries = sorted(os.listdir(source_dir))
+    except OSError:
+        return None
+
+    for name in entries:
+        if name.startswith(".") or not name.lower().endswith(".zip"):
+            continue
+        full = os.path.join(source_dir, name)
+        if not os.path.isfile(full):
+            continue
+
+        info = _inspect_update_zip(full)
+        if info is None:
+            continue
+
+        current = update_check.__version__
+        if update_check._parse_version(info["version"]) <= update_check._parse_version(current):
+            log(f"{name}（v{info['version']}）は現在のバージョン（v{current}）以下のため無視します")
+            continue
+
+        staging_dir = os.path.join(image_folder, ".usb_update")
+        os.makedirs(staging_dir, exist_ok=True)
+        staged_zip = os.path.join(staging_dir, "pending.zip")
+        try:
+            shutil.copyfile(full, staged_zip)
+        except OSError as e:
+            log(f"アップデートパッケージのコピーに失敗しました（{name}）: {e}")
+            continue
+
+        signage_state.save_usb_update_pending(
+            image_folder, version=info["version"], zip_path=staged_zip, current_version=current)
+        log(f"USBアップデートパッケージを検出・ステージングしました: {name} "
+            f"（v{current} → v{info['version']}）。本体ボタンの長押しで適用を確定できます")
+        return f"アップデート(v{info['version']})を検出しました。本体ボタンの長押しで適用できます"
+
+    return None
+
+
 def parse_arg(arg):
     """systemdのインスタンス名（%i）から (デバイス名, イベント種別) を取り出す。
     例: "sda1-add" -> ("sda1", "add"), "sda1-remove" -> ("sda1", "remove")。
@@ -395,10 +516,29 @@ def handle_add(device_name):
 
     try:
         result = import_images(MOUNT_POINT, IMAGE_FOLDER)
+        update_message = find_and_stage_update_package(MOUNT_POINT, IMAGE_FOLDER)
     finally:
         unmount()
 
-    message = build_notice_message(result)
+    # 画像の取り込み結果とアップデートパッケージの検出結果、両方あり得るため
+    # それぞれ独立に組み立てて連結する。画像が1枚も無かった（result["error"]）
+    # 場合でも、アップデートパッケージだけを持ってきたUSBという可能性がある
+    # ため、その時は画像側のエラー文言は出さない。
+    parts = []
+    if result["imported"] or result["restored"]:
+        parts.append(build_notice_message(result))
+    elif result["error"] and not update_message:
+        parts.append(result["error"])
+    elif result["error"]:
+        log(f"画像の取り込みは無し（アップデートパッケージのみ検出）: {result['error']}")
+
+    if update_message:
+        parts.append(update_message)
+
+    if not parts:
+        parts.append("USBメモリーに取り込める画像もアップデートパッケージも見つかりませんでした")
+
+    message = "　".join(parts)
     # 取り込み結果に関わらず、USBを抜いてよいタイミングをユーザーが見て
     # 判断できるよう、抜くまで（handle_removalが呼ばれるまで）表示し続ける
     signage_state.save_notice(IMAGE_FOLDER, message, sticky=True)

@@ -18,6 +18,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -26,7 +27,9 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import zipfile
 
+import signage_state
 from version import __version__
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -128,8 +131,24 @@ def _extract_single_dir(archive_path, extract_to):
     return os.path.join(extract_to, entries[0])
 
 
+def _extract_single_dir_zip(archive_path, extract_to):
+    """GitHub Releaseの「Source code (zip)」をそのまま展開し、中の唯一の
+    トップフォルダのパスを返す（USBオフラインアップデート用）。
+    tar.gz版の_extract_single_dirと構造・安全対策（パストラバーサル対策）は同じ。"""
+    with zipfile.ZipFile(archive_path) as zf:
+        for name in zf.namelist():
+            if name.startswith("/") or ".." in name.split("/"):
+                raise ValueError(f"不正なパスを含むアーカイブです: {name}")
+        zf.extractall(extract_to)
+
+    entries = [e for e in os.listdir(extract_to) if not e.startswith(".")]
+    if len(entries) != 1:
+        raise ValueError(f"展開されたフォルダの構成が想定と異なります: {entries}")
+    return os.path.join(extract_to, entries[0])
+
+
 def apply_update(tarball_url, target_version, timeout=60):
-    """新バージョンをダウンロードして適用する。
+    """新バージョンをGitHub Releasesからダウンロードして適用する（オンラインOTA）。
     戻り値は (成功したか, メッセージ) のタプル。
     ※このプロセス自身が最後に再起動される可能性があるため、状態は
       戻り値だけでなく、途中経過も逐一 _write_status() でファイルに残す。"""
@@ -167,98 +186,155 @@ def apply_update(tarball_url, target_version, timeout=60):
             _write_status("failed", error=msg, target_version=target_version)
             return False, msg
 
-        backup_dir = os.path.join(APP_DIR, f".backup-{__version__}")
-        if os.path.exists(backup_dir):
-            shutil.rmtree(backup_dir)
-        os.makedirs(backup_dir)
+        return _swap_and_finish(src_dir, target_version)
 
-        moved = []
+
+def apply_update_from_zip(zip_path, target_version, timeout=60):
+    """USBメモリー経由でステージング済みのzipファイル（GitHub Releaseの
+    「Source code (zip)」をそのまま置いたもの）から適用する（オフラインOTA）。
+    ダウンロード部分が「ローカルファイルの展開」に変わるだけで、それ以降の
+    検証・バックアップ・ロールバック・root仕上げ処理はapply_update()と全く同じ
+    _swap_and_finish()を共有しており、安全性はオンライン版と同等。
+    戻り値は (成功したか, メッセージ) のタプル。"""
+    log(f"USBアップデート処理を開始します: target_version={target_version}, zip_path={zip_path}")
+    _write_status("applying", target_version=target_version)
+
+    if not zip_path or not os.path.isfile(zip_path):
+        msg = "USBに保存したはずのアップデートパッケージが見つかりませんでした"
+        log(f"失敗: {msg}")
+        _write_status("failed", error=msg, target_version=target_version)
+        return False, msg
+
+    with tempfile.TemporaryDirectory(prefix="pophug-usb-update-") as tmp:
+        extract_dir = os.path.join(tmp, "extracted")
+        os.makedirs(extract_dir)
         try:
-            # 既存ファイルを一旦バックアップへ退避（images/やvenv/は温存）
-            for name in os.listdir(APP_DIR):
-                if name in PRESERVE or name.startswith(".backup-"):
-                    continue
-                src = os.path.join(APP_DIR, name)
-                dst = os.path.join(backup_dir, name)
-                shutil.move(src, dst)
-                moved.append(name)
-            log(f"既存ファイルの退避完了: {moved}")
-
-            # 新しいファイルを配置
-            placed = []
-            for name in os.listdir(src_dir):
-                if name in PRESERVE:
-                    continue
-                shutil.move(os.path.join(src_dir, name), os.path.join(APP_DIR, name))
-                placed.append(name)
-            log(f"新しいファイルの配置完了: {placed}")
-
-            # 依存パッケージを更新（requirements.txtに変更が無ければ実質何もしない）
-            pip_path = os.path.join(APP_DIR, "venv", "bin", "pip")
-            req_path = os.path.join(APP_DIR, "requirements.txt")
-            if os.path.exists(pip_path) and os.path.exists(req_path):
-                log("pip install を実行します...")
-                pip_result = subprocess.run(
-                    [pip_path, "install", "-r", req_path],
-                    capture_output=True, text=True, timeout=180,
-                )
-                if pip_result.returncode != 0:
-                    log(f"pip installで警告（続行します）: {pip_result.stderr}")
-                else:
-                    log("pip install 完了")
-            else:
-                log(f"pip installをスキップ（pip_path存在={os.path.exists(pip_path)}, "
-                    f"req_path存在={os.path.exists(req_path)}）")
-
-            # 新しいコードが最低限壊れていないか確認する
-            python_path = os.path.join(APP_DIR, "venv", "bin", "python3")
-            main_path = os.path.join(APP_DIR, "main.py")
-            log(f"新しいコードの検証を実行します（{python_path}）...")
-            check = subprocess.run(
-                [python_path, "-m", "py_compile", main_path],
-                capture_output=True, text=True, timeout=30,
-            )
-            if check.returncode != 0:
-                raise RuntimeError(f"新しいコードの検証に失敗しました: {check.stderr}")
-            log("新しいコードの検証OK")
-
+            src_dir = _extract_single_dir_zip(zip_path, extract_dir)
+            log(f"展開完了: {src_dir}")
         except Exception as e:
-            msg = f"{e}（元のバージョンに戻しました）"
-            log(f"失敗、ロールバックします: {e}\n{traceback.format_exc()}")
-            _rollback(backup_dir, moved)
-            _write_status("failed", error=msg, target_version=target_version)
-            return False, msg
-
-        # ここまでファイルの入れ替え・検証は完了している。
-        # この後のsudo呼び出しでサービスが再起動されると、このプロセス自体が
-        # 結果を返す前に強制終了する可能性が高いため、"success"は今のうちに
-        # ファイルへ書き込んでおく（実際の再起動が失敗した場合の考慮は下記）。
-        log("root権限が必要な仕上げ処理（pophug-netctlの入れ替え・サービス再起動）を実行します...")
-        _write_status("success", target_version=target_version)
-
-        try:
-            r = subprocess.run(
-                ["sudo", UPDATE_APPLY_PATH, APP_DIR],
-                capture_output=True, text=True, timeout=30,
-            )
-        except Exception as e:
-            # ここに到達した＝プロセスは生きているのでサービス再起動はされていない。
-            # ロールバックしてfailedに書き戻す。
-            msg = f"仕上げ処理の実行に失敗しました: {e}（元のバージョンに戻しました）"
+            msg = f"アーカイブの展開に失敗しました: {e}"
             log(f"失敗: {msg}\n{traceback.format_exc()}")
-            _rollback(backup_dir, moved)
             _write_status("failed", error=msg, target_version=target_version)
             return False, msg
 
-        if r.returncode != 0:
-            msg = f"仕上げ処理に失敗しました: {r.stderr}（元のバージョンに戻しました）"
-            log(f"失敗: {msg}\nstdout={r.stdout}\nstderr={r.stderr}")
-            _rollback(backup_dir, moved)
-            _write_status("failed", error=msg, target_version=target_version)
-            return False, msg
+        ok, msg = _swap_and_finish(src_dir, target_version)
 
-        log(f"仕上げ処理成功: stdout={r.stdout}")
-        return True, f"v{target_version} への更新を適用しました。再起動しています..."
+    if ok:
+        # 適用成功。この後サービスごと再起動される想定だが、実際の再起動は
+        # pophug-update-apply側でsystemd-runにより2秒後のタイマーとして
+        # 予約されるだけなので、それまでの短い猶予でここの後片付け（保留状態・
+        # ステージング済みzipの削除）を済ませておく。images/はPRESERVE対象として
+        # 新旧どちらのファイル配置でも温存されるため、ファイル入れ替え後もこの
+        # 後片付けは安全に行える（そのまま残しておくとSDカードの空き容量を
+        # 無駄に圧迫し続けてしまうため）。失敗してもアップデート自体の成否には
+        # 影響しないので、ログに残すだけで続行する。
+        try:
+            signage_state.clear_usb_update_pending(os.path.join(APP_DIR, "images"))
+            log("USBアップデートの保留状態・ステージング済みファイルを片付けました")
+        except Exception as e:
+            log(f"保留状態の後片付けに失敗しました（無視して続行）: {e}")
+
+    return ok, msg
+
+
+def _swap_and_finish(src_dir, target_version):
+    """展開済みディレクトリsrc_dirから、既存ファイルの退避・新ファイルの配置・
+    pip install・構文検証・root仕上げ処理(pophug-update-apply)までを行う共通処理。
+    オンライン(apply_update)・オフライン(apply_update_from_zip)の両方から
+    同じこの関数を通ることで、検証内容やロールバック挙動に差異が生まれないようにしている。
+    戻り値は (成功したか, メッセージ) のタプル。"""
+    backup_dir = os.path.join(APP_DIR, f".backup-{__version__}")
+    if os.path.exists(backup_dir):
+        shutil.rmtree(backup_dir)
+    os.makedirs(backup_dir)
+
+    moved = []
+    try:
+        # 既存ファイルを一旦バックアップへ退避（images/やvenv/は温存）
+        for name in os.listdir(APP_DIR):
+            if name in PRESERVE or name.startswith(".backup-"):
+                continue
+            src = os.path.join(APP_DIR, name)
+            dst = os.path.join(backup_dir, name)
+            shutil.move(src, dst)
+            moved.append(name)
+        log(f"既存ファイルの退避完了: {moved}")
+
+        # 新しいファイルを配置
+        placed = []
+        for name in os.listdir(src_dir):
+            if name in PRESERVE:
+                continue
+            shutil.move(os.path.join(src_dir, name), os.path.join(APP_DIR, name))
+            placed.append(name)
+        log(f"新しいファイルの配置完了: {placed}")
+
+        # 依存パッケージを更新（requirements.txtに変更が無ければ実質何もしない）
+        pip_path = os.path.join(APP_DIR, "venv", "bin", "pip")
+        req_path = os.path.join(APP_DIR, "requirements.txt")
+        if os.path.exists(pip_path) and os.path.exists(req_path):
+            log("pip install を実行します...")
+            pip_result = subprocess.run(
+                [pip_path, "install", "-r", req_path],
+                capture_output=True, text=True, timeout=180,
+            )
+            if pip_result.returncode != 0:
+                log(f"pip installで警告（続行します）: {pip_result.stderr}")
+            else:
+                log("pip install 完了")
+        else:
+            log(f"pip installをスキップ（pip_path存在={os.path.exists(pip_path)}, "
+                f"req_path存在={os.path.exists(req_path)}）")
+
+        # 新しいコードが最低限壊れていないか確認する
+        python_path = os.path.join(APP_DIR, "venv", "bin", "python3")
+        main_path = os.path.join(APP_DIR, "main.py")
+        log(f"新しいコードの検証を実行します（{python_path}）...")
+        check = subprocess.run(
+            [python_path, "-m", "py_compile", main_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if check.returncode != 0:
+            raise RuntimeError(f"新しいコードの検証に失敗しました: {check.stderr}")
+        log("新しいコードの検証OK")
+
+    except Exception as e:
+        msg = f"{e}（元のバージョンに戻しました）"
+        log(f"失敗、ロールバックします: {e}\n{traceback.format_exc()}")
+        _rollback(backup_dir, moved)
+        _write_status("failed", error=msg, target_version=target_version)
+        return False, msg
+
+    # ここまでファイルの入れ替え・検証は完了している。
+    # この後のsudo呼び出しでサービスが再起動されると、このプロセス自体が
+    # 結果を返す前に強制終了する可能性が高いため、"success"は今のうちに
+    # ファイルへ書き込んでおく（実際の再起動が失敗した場合の考慮は下記）。
+    log("root権限が必要な仕上げ処理（pophug-netctlの入れ替え・サービス再起動）を実行します...")
+    _write_status("success", target_version=target_version)
+
+    try:
+        r = subprocess.run(
+            ["sudo", UPDATE_APPLY_PATH, APP_DIR],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as e:
+        # ここに到達した＝プロセスは生きているのでサービス再起動はされていない。
+        # ロールバックしてfailedに書き戻す。
+        msg = f"仕上げ処理の実行に失敗しました: {e}（元のバージョンに戻しました）"
+        log(f"失敗: {msg}\n{traceback.format_exc()}")
+        _rollback(backup_dir, moved)
+        _write_status("failed", error=msg, target_version=target_version)
+        return False, msg
+
+    if r.returncode != 0:
+        msg = f"仕上げ処理に失敗しました: {r.stderr}（元のバージョンに戻しました）"
+        log(f"失敗: {msg}\nstdout={r.stdout}\nstderr={r.stderr}")
+        _rollback(backup_dir, moved)
+        _write_status("failed", error=msg, target_version=target_version)
+        return False, msg
+
+    log(f"仕上げ処理成功: stdout={r.stdout}")
+    return True, f"v{target_version} への更新を適用しました。再起動しています..."
 
 
 def _rollback(backup_dir, moved_names):
