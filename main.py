@@ -184,6 +184,8 @@ class PopSignage:
         self.last_usb_update_pending_mtime = usb_update_pending_mtime(IMAGE_FOLDER)
         self._usb_update_applying = False  # 適用処理の多重起動防止
 
+        self._shutting_down = False  # ボタン長押しでシャットダウンが確定した後、真になる
+
         self.load_pop_images(initial=True)
 
         if UPLOAD_ENABLED:
@@ -448,6 +450,11 @@ class PopSignage:
 
     def _handle_button_release(self, held_seconds):
         """ボタンが離された時、押していた時間に応じた動作を実行する"""
+        if self._shutting_down:
+            # シャットダウンが確定した後は、実際に電源が落ちるまでの短い間に
+            # ボタンが再度押されても一切反応しない（誤操作防止）
+            return
+
         if self.wifi_setup_active:
             # セットアップモード中は、押した時間に関わらずキャンセル操作として扱う
             self.exit_wifi_setup_mode()
@@ -562,34 +569,46 @@ class PopSignage:
             f"再度適用するにはUSBメモリーを挿し直してください")
 
     def _trigger_button_shutdown(self):
-        """物理ボタンの長押しでシャットダウンを実行する（Web版と同じsudoersの許可を利用）"""
+        """物理ボタンの長押しでシャットダウンを実行する（Web版と同じsudoersの許可を利用）。
+        以前はここで「シャットダウンしています...」を1フレームだけ描画してflipしていたが、
+        実際のシャットダウンコマンドが効くまでの1秒ほどの間にrun()側の通常描画（スライドショー）
+        に上書きされてしまい、あたかもシャットダウンされなかったかのように見える不具合があった
+        （USBアップデート適用中の表示と同種の問題）。_shutting_downフラグをrun()側の描画分岐に
+        組み込み、電源が落ちるまで専有画面を毎フレーム描画し続けるようにしている。"""
         log("ボタン長押しによるシャットダウン要求を受け付けました")
         self._hide_qr()
         self.manual_active = False
-
-        # すぐに反映されるよう、シャットダウン中である旨を1フレーム描画してからflipする
-        self.canvas.fill((10, 10, 10))
-        surf = self._render_fit_text(
-            "シャットダウンしています...", self.canvas.get_width() - 48,
-            start_size=30, min_size=16, color=(255, 120, 120))
-        self.canvas.blit(surf, (
-            self.canvas.get_width() // 2 - surf.get_width() // 2,
-            self.canvas.get_height() // 2 - surf.get_height() // 2))
-        if ROTATE_SCREEN:
-            rotated = pygame.transform.rotate(self.canvas, -ROTATE_SCREEN)
-            self.screen.blit(rotated, (0, 0))
-        else:
-            self.screen.blit(self.canvas, (0, 0))
-        pygame.display.flip()
+        self._shutting_down = True
 
         def do_shutdown():
-            time.sleep(1)  # 画面の更新が確実に反映されてから実行する
+            time.sleep(1)  # 専有画面が確実に数フレーム表示されてから実行する
             try:
                 subprocess.run(SHUTDOWN_COMMAND, check=True, capture_output=True, text=True, timeout=15)
             except Exception as e:
                 log(f"シャットダウンに失敗しました: {e}")
+                # コマンド自体が失敗した場合は、電源は落ちないままなので専有画面を解除し、
+                # 通常表示に戻した上でエラーを知らせる（＝画面が固まって見えることを防ぐ）
+                self._shutting_down = False
+                self._show_notice(f"シャットダウンに失敗しました（{e}）", sticky=True)
 
         threading.Thread(target=do_shutdown, daemon=True).start()
+
+    def draw_shutdown_screen(self):
+        """シャットダウンが確定してから実際に電源が落ちるまでの間、毎フレーム描画する
+        専有画面。draw_usb_update_applying_screenと同じ考え方で、古い画面（スライドショー等）
+        が再表示されて「シャットダウンされなかった」と誤解されることのないようにしている。"""
+        self.canvas.fill((10, 10, 10))
+        surf = self._render_fit_text(
+            "シャットダウンしています...", self.canvas.get_width() - 48,
+            start_size=30, min_size=16, color=(255, 120, 120))
+        sub = self._render_fit_text(
+            "しばらくすると電源が切れます", self.canvas.get_width() - 48,
+            start_size=18, min_size=12, color=(200, 200, 200))
+        total_h = surf.get_height() + 16 + sub.get_height()
+        base_y = self.canvas.get_height() // 2 - total_h // 2
+        self.canvas.blit(surf, (self.canvas.get_width() // 2 - surf.get_width() // 2, base_y))
+        self.canvas.blit(sub, (self.canvas.get_width() // 2 - sub.get_width() // 2,
+                                base_y + surf.get_height() + 16))
 
     def draw_button_hold_overlay(self):
         """ボタンを押している最中、あとどれだけ押せば何が起きるかを画面に表示する"""
@@ -1448,7 +1467,11 @@ class PopSignage:
                     if not wifi_setup.is_client_connected():
                         self._enter_standalone_mode()
 
-                if self._usb_update_applying:
+                if self._shutting_down:
+                    # シャットダウンが確定した後は、実際に電源が落ちるまで
+                    # 他の何よりも優先してこの専有画面を出し続ける
+                    self.draw_shutdown_screen()
+                elif self._usb_update_applying:
                     # USBアップデートの適用処理が進行中（ボタン長押しで確定済み、
                     # まだサービス再起動前）。他の何より優先して専有画面を出し続け、
                     # スライドショーや古い通知・バッジが再表示されて
