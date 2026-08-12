@@ -1175,49 +1175,25 @@ def create_app(image_folder):
 
     @app.route("/settings", methods=["POST"])
     def update_settings():
-        updates = {}
-
-        if "transition_duration" in request.form:
-            try:
-                duration = float(request.form.get("transition_duration"))
-            except (TypeError, ValueError):
-                return {"error": "invalid transition_duration"}, 400
-            updates["transition_duration"] = round(max(0.1, min(duration, 5.0)), 1)
-
-        if "image_interval" in request.form:
-            try:
-                interval = float(request.form.get("image_interval"))
-            except (TypeError, ValueError):
-                return {"error": "invalid image_interval"}, 400
-            updates["image_interval"] = round(max(2.0, min(interval, 60.0)), 1)
-
-        if "priority_interval" in request.form:
-            try:
-                p_interval = int(float(request.form.get("priority_interval")))
-            except (TypeError, ValueError):
-                return {"error": "invalid priority_interval"}, 400
-            updates["priority_interval"] = max(1, min(p_interval, 50))
-
-        if "transition_type" in request.form:
-            ttype = request.form.get("transition_type")
-            if ttype not in TRANSITION_TYPE_LABELS:
-                return {"error": "invalid transition_type"}, 400
-            updates["transition_type"] = ttype
-
-        if "setup_ap_ssid" in request.form:
-            ssid = request.form.get("setup_ap_ssid", "").strip()
-            if not (0 < len(ssid) <= 32):
-                return {"error": "invalid setup_ap_ssid"}, 400
-            updates["setup_ap_ssid"] = ssid
-
-        if "setup_ap_password" in request.form:
-            pw = request.form.get("setup_ap_password", "")
-            if pw != "" and not (8 <= len(pw) <= 63):
-                return {"error": "invalid setup_ap_password"}, 400
-            updates["setup_ap_password"] = pw
-
-        if not updates:
+        # 検証・範囲チェックはsignage_state.validate_settings_updatesに集約している
+        # （USB設定ファイル取り込み側と同じ基準を共有するため）。Web側は従来通り、
+        # 送られてきた項目のうち1つでも無効な値があれば全体を拒否する
+        # （フォームは基本的にHTML側のmin/max付きinputで送られてくるため、
+        # ここでの無効値は通常フォーム改ざん等の異常系であり、部分適用よりも
+        # エラーを返す方が適切と判断）。
+        raw = {
+            key: request.form.get(key)
+            for key in ("transition_duration", "image_interval", "priority_interval",
+                        "transition_type", "setup_ap_ssid", "setup_ap_password")
+            if key in request.form
+        }
+        if not raw:
             return {"error": "no valid fields"}, 400
+
+        updates, errors = signage_state.validate_settings_updates(raw)
+        if errors:
+            key, reason = errors[0]
+            return {"error": f"invalid {key}: {reason}"}, 400
 
         defaults = {
             "transition_duration": DEFAULT_TRANSITION_DURATION,

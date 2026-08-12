@@ -255,6 +255,80 @@ def settings_mtime(image_folder):
         return None
 
 
+# 設定値の妥当な範囲・選択肢（Web設定画面／USB設定ファイルの両方で共有する基準）
+VALID_TRANSITION_TYPES = ("fade", "slide_left", "slide_right", "slide_up", "slide_down")
+VALID_ROTATIONS = (0, 90, 180, 270)
+
+
+def validate_settings_updates(raw_values):
+    """設定値の候補（文字列または数値。キーはload_settings/save_settingsと同じ
+    内部キー名）を受け取り、範囲チェック・丸め込みを行った上で有効な項目だけを
+    返す。Web設定画面(upload_server.py)とUSB設定ファイル(pophug-usb-import)の
+    両方から呼ばれる、検証ルールの唯一の実装（二重実装による基準のズレを防ぐため）。
+    raw_valuesに含まれないキーはvalidにもerrorsにも現れない（そのキーは
+    「今回は変更しない」という意味になる）。raw_valuesに含まれていても
+    認識できないキーは無視する（呼び出し側でraw_values.keys()と
+    valid.keys()|{e[0] for e in errors}の差分を見れば「未知のキー」を検出できる）。
+    戻り値: (valid_updates: dict, errors: list[(key, message)])"""
+    valid = {}
+    errors = []
+
+    if "transition_duration" in raw_values:
+        try:
+            v = round(max(0.1, min(float(raw_values["transition_duration"]), 5.0)), 1)
+            valid["transition_duration"] = v
+        except (TypeError, ValueError):
+            errors.append(("transition_duration", "数値ではありません（0.1〜5.0の範囲で指定してください）"))
+
+    if "image_interval" in raw_values:
+        try:
+            v = round(max(2.0, min(float(raw_values["image_interval"]), 60.0)), 1)
+            valid["image_interval"] = v
+        except (TypeError, ValueError):
+            errors.append(("image_interval", "数値ではありません（2.0〜60.0の範囲で指定してください）"))
+
+    if "priority_interval" in raw_values:
+        try:
+            v = max(1, min(int(float(raw_values["priority_interval"])), 50))
+            valid["priority_interval"] = v
+        except (TypeError, ValueError):
+            errors.append(("priority_interval", "数値ではありません（1〜50の範囲で指定してください）"))
+
+    if "transition_type" in raw_values:
+        v = str(raw_values["transition_type"]).strip()
+        if v in VALID_TRANSITION_TYPES:
+            valid["transition_type"] = v
+        else:
+            errors.append(("transition_type", f"{'/'.join(VALID_TRANSITION_TYPES)} のいずれかで指定してください"))
+
+    if "rotation" in raw_values:
+        try:
+            v = int(float(raw_values["rotation"])) % 360
+        except (TypeError, ValueError):
+            errors.append(("rotation", "数値ではありません（0/90/180/270のいずれかで指定してください）"))
+        else:
+            if v in VALID_ROTATIONS:
+                valid["rotation"] = v
+            else:
+                errors.append(("rotation", "0/90/180/270のいずれかで指定してください"))
+
+    if "setup_ap_ssid" in raw_values:
+        v = str(raw_values["setup_ap_ssid"]).strip()
+        if 0 < len(v) <= 32:
+            valid["setup_ap_ssid"] = v
+        else:
+            errors.append(("setup_ap_ssid", "1〜32文字で指定してください"))
+
+    if "setup_ap_password" in raw_values:
+        v = str(raw_values["setup_ap_password"])
+        if v == "" or (8 <= len(v) <= 63):
+            valid["setup_ap_password"] = v
+        else:
+            errors.append(("setup_ap_password", "空、または8〜63文字で指定してください"))
+
+    return valid, errors
+
+
 # ---------------- 優先表示タグ ----------------
 # アップロードページで「優先表示1」〜「優先表示5」に設定した画像のファイル名を
 # images/.priority.json に {ファイル名: "priority1"〜"priority5"} の形で保存する。

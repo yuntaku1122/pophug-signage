@@ -3,9 +3,10 @@
 # pophug-usb-import
 #
 # USBメモリー挿入時に自動実行される、root権限が必要な画像取り込み・
-# アップデートパッケージ検出処理。udevルール(99-pophug-usb.rules)経由で、
-# systemdテンプレートユニット(pophug-usb-import@.service)としてroot権限で
-# 起動される。ネットワーク経由の入力は一切受け付けず、起動元はカーネルの
+# アップデートパッケージ検出・設定ファイル適用処理。udevルール
+# (99-pophug-usb.rules)経由で、systemdテンプレートユニット
+# (pophug-usb-import@.service)としてroot権限で起動される。
+# ネットワーク経由の入力は一切受け付けず、起動元はカーネルの
 # udevイベントのみ（pophug-netctl等のようにWebサーバーからsudo経由で
 # 呼ばれるものではない）。
 #
@@ -31,6 +32,15 @@
 #      へコピーし、images/.usb_update_pending.json に検出結果を記録する
 #      （実際の適用はまだ行わない。安全のため自動適用はせず、本体ボタンの
 #      長押しで明示的に確定してもらう2段階方式。main.py側で処理される）
+#
+# 処理の流れ（USB設定ファイル、画像取り込みとは独立して毎回行う）:
+#   ア. トップレベルに「pophug-settings.txt」(大文字小文字不問)があれば、
+#      「key = value」形式（'#'以降はコメント）として解析する
+#   イ. 有効な項目だけをimages/.settings.jsonへ即座に自動適用する
+#      （画像取り込みと同様、確認なしで反映。設定はコード実行を伴わず
+#      いつでもWeb画面から元に戻せる可逆的な操作のため）。範囲外の値や
+#      未知のキーは個別にスキップし、ログに警告を残す（1箇所のタイプミスで
+#      ファイル全体が無視されることはない）
 #
 #   共通の後処理:
 #   6. 本体画面に完了通知（images/.notice.json、USBを抜くまで表示され続ける）を出し、
@@ -78,6 +88,7 @@ POPHUG_GROUP = "pophug"
 FIXED_PREFIX = "fixed_"
 SUPPORTED_EXT = (".jpg", ".jpeg", ".png")
 DEVICE_RE = re.compile(r"^sd[a-z][0-9]+$")
+SETTINGS_FILENAME = "pophug-settings.txt"
 LOCK_PATH = "/tmp/pophug-usb-import.lock"
 
 # 拡張子ごとの正しいマジックバイト（ファイル先頭の署名）。
@@ -455,6 +466,96 @@ def find_and_stage_update_package(source_dir, image_folder):
     return None
 
 
+# ---------------- USB設定ファイルの読み込み・自動適用 ----------------
+# Web設定画面で変更できる項目（画像切替間隔、トランジション等）を、
+# USBメモリー直下に置いた「pophug-settings.txt」というテキストファイルからも
+# 設定できるようにする。「key = value」形式で、'#'以降はコメット。
+# 画像取り込みと同様、確認なしで即座に自動適用する（設定はコード実行を伴わず、
+# いつでもWeb画面から元に戻せる可逆的な操作のため、USBアップデートのような
+# ボタン長押し確認は要求しない）。複数台に同じ設定を配って回る運用を想定。
+
+def parse_settings_text_file(path):
+    """key = value 形式のテキストファイルを解析する。
+    '#'以降はコメントとして無視。空行・コメントのみの行、'='が無い行、
+    キーが空の行も無視する。値の妥当性チェックはここでは行わない
+    （signage_state.validate_settings_updatesに任せる）。
+    戻り値: {key: value(文字列)} の辞書。読み込み自体に失敗した場合は空の辞書。"""
+    raw = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except (OSError, UnicodeDecodeError) as e:
+        log(f"設定ファイルの読み込みに失敗しました（{path}）: {e}")
+        return raw
+
+    for lineno, line in enumerate(lines, start=1):
+        body = line.split("#", 1)[0].strip()
+        if not body:
+            continue
+        if "=" not in body:
+            log(f"設定ファイル {lineno}行目: '=' が無いため無視します: {line.rstrip()!r}")
+            continue
+        key, _, value = body.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        raw[key] = value
+    return raw
+
+
+def find_and_apply_settings_file(source_dir, image_folder):
+    """USBのトップレベルにある設定ファイル(pophug-settings.txt、大文字小文字は
+    区別しない)を探し、有効な項目だけをimages/.settings.jsonへ即座に自動適用する。
+    ファイルの一部の行に誤りがあっても、有効な行だけを適用し、無効な行は
+    個別にスキップしてログへ警告を残す（1箇所のタイプミスで全体が反映され
+    ないと、手打ちのテキストファイルでは扱いづらいため）。
+    戻り値: 適用結果を表すユーザー向けメッセージ、またはファイルが無ければNone。"""
+    if signage_state is None:
+        return None
+
+    try:
+        entries = os.listdir(source_dir)
+    except OSError:
+        return None
+
+    matches = [n for n in entries if n.lower() == SETTINGS_FILENAME]
+    if not matches:
+        return None
+    name = matches[0]
+    path = os.path.join(source_dir, name)
+    if not os.path.isfile(path):
+        return None
+
+    raw = parse_settings_text_file(path)
+    if not raw:
+        log(f"設定ファイル（{name}）に有効な設定項目が見つかりませんでした")
+        return f"設定ファイル（{name}）に有効な項目が見つかりませんでした"
+
+    valid, errors = signage_state.validate_settings_updates(raw)
+
+    recognized = set(valid) | {key for key, _ in errors}
+    unknown = sorted(set(raw) - recognized)
+    for key in unknown:
+        log(f"設定ファイル（{name}）: 未知のキーを無視します: {key}")
+    for key, reason in errors:
+        log(f"設定ファイル（{name}）: {key} の値が不正なため無視します（{reason}）: {raw.get(key)!r}")
+
+    if not valid:
+        return f"設定ファイル（{name}）に反映できる項目がありませんでした"
+
+    signage_state.save_settings(image_folder, valid)
+
+    applied_desc = "、".join(f"{k}={v}" for k, v in valid.items())
+    log(f"設定ファイル（{name}）から{len(valid)}件を適用しました: {applied_desc}")
+
+    skipped = len(errors) + len(unknown)
+    msg = f"設定({len(valid)}件)を適用しました"
+    if skipped:
+        msg += f"（{skipped}件は無視: 値が不正または未知のキー）"
+    return msg
+
+
 def parse_arg(arg):
     """systemdのインスタンス名（%i）から (デバイス名, イベント種別) を取り出す。
     例: "sda1-add" -> ("sda1", "add"), "sda1-remove" -> ("sda1", "remove")。
@@ -517,26 +618,29 @@ def handle_add(device_name):
     try:
         result = import_images(MOUNT_POINT, IMAGE_FOLDER)
         update_message = find_and_stage_update_package(MOUNT_POINT, IMAGE_FOLDER)
+        settings_message = find_and_apply_settings_file(MOUNT_POINT, IMAGE_FOLDER)
     finally:
         unmount()
 
-    # 画像の取り込み結果とアップデートパッケージの検出結果、両方あり得るため
-    # それぞれ独立に組み立てて連結する。画像が1枚も無かった（result["error"]）
-    # 場合でも、アップデートパッケージだけを持ってきたUSBという可能性がある
-    # ため、その時は画像側のエラー文言は出さない。
+    # 画像の取り込み結果・アップデートパッケージの検出結果・設定ファイルの
+    # 適用結果、3つとも同時に起こり得るためそれぞれ独立に組み立てて連結する。
+    # 画像が1枚も無かった（result["error"]）場合でも、アップデートや設定だけを
+    # 持ってきたUSBという可能性があるため、その時は画像側のエラー文言は出さない。
     parts = []
     if result["imported"] or result["restored"]:
         parts.append(build_notice_message(result))
-    elif result["error"] and not update_message:
+    elif result["error"] and not (update_message or settings_message):
         parts.append(result["error"])
     elif result["error"]:
-        log(f"画像の取り込みは無し（アップデートパッケージのみ検出）: {result['error']}")
+        log(f"画像の取り込みは無し（他の項目のみ検出）: {result['error']}")
 
     if update_message:
         parts.append(update_message)
+    if settings_message:
+        parts.append(settings_message)
 
     if not parts:
-        parts.append("USBメモリーに取り込める画像もアップデートパッケージも見つかりませんでした")
+        parts.append("USBメモリーに取り込める画像もアップデートパッケージも設定ファイルも見つかりませんでした")
 
     message = "　".join(parts)
     # 取り込み結果に関わらず、USBを抜いてよいタイミングをユーザーが見て
