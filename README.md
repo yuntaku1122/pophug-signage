@@ -12,7 +12,8 @@
 |---|---|
 | `main.py` | pygameによるスライドショー本体。QRボタン機能も含む |
 | `config.py` | 画面サイズ、間隔、GPIOピン番号などの設定 |
-| `pophug-install.sh` | まっさらなRaspberry Pi OSへの個別インストールを1コマンドで行うブートストラップスクリプト（後述） |
+| `pophug-bootstrap.sh` | 個別インストールの入口。リポジトリのclone〜`pophug-install.sh`の実行〜再起動確認までを行う（後述） |
+| `pophug-install.sh` | まっさらなRaspberry Pi OSへの個別インストール本体（venv構築・sudoers設定・各種登録）を行うスクリプト（後述） |
 | `upload_server.py` | iPhoneからの画像アップロード用Webサーバー（Flask） |
 | `signage_state.py` | 表示/非表示・トランジション速度などの状態（`images/.hidden.json`, `images/.settings.json`）の読み書き |
 | `wifi_setup.py` | Wi-Fiセットアップモード関連（SSID自動生成、QRペイロード生成、netctl呼び出し） |
@@ -46,7 +47,7 @@ python3 main.py
 `images/`フォルダにJPEG/PNGを置くと自動でスライドショーに反映される。
 起動すると`http://<このマシンのIP>:8080`でアップロードページが開く。
 
-## 実機への個別インストール（`pophug-install.sh`、量産マスターイメージを使わない場合）
+## 実機への個別インストール（`pophug-bootstrap.sh`、量産マスターイメージを使わない場合）
 
 Pi Zero 2W Hの調達難などで、まとまった台数を一括複製できず、中古Pi等を1台ずつ
 セットアップせざるを得ない場合向け。従来この後の3セクションに分散していた手順
@@ -63,17 +64,33 @@ Pi 3B等、40ピンGPIOヘッダを持つRaspberry Piであれば動作するは
 - セットアップ作業用に、自宅などのWi-Fiに接続しておく（apt/pip/gitのため。
   現場のWi-Fiとは別。現場のWi-Fiは後述のWi-Fiセットアップモードで設定する）
 
+SSHで接続したら、以下の2行だけでよい（`pophug-bootstrap.sh`を1本ダウンロードして
+実行するだけで、リポジトリのclone・`pophug-install.sh`の実行・再起動確認までを
+一気に行う）。
+
 ```bash
-git clone https://github.com/yuntaku1122/pophug-signage.git
-cd pophug-signage
-bash pophug-install.sh
-sudo reboot
+curl -fsSL -o pophug-bootstrap.sh https://raw.githubusercontent.com/yuntaku1122/pophug-signage/main/pophug-bootstrap.sh
+bash pophug-bootstrap.sh
 ```
 
+`curl ... | bash`のように直接パイプ実行しないこと。標準入力がcurl側に使われて
+しまい、スクリプト内の確認プロンプト（ユーザー/パス不一致時の警告、最後の
+再起動確認）に答えられなくなるため、あえてダウンロード→実行の2段階にしている。
+
 実行すると、OSパッケージ・Python仮想環境・ヘルパースクリプト・sudoers設定・
-systemdユニット・udevルールが一通りセットアップされる。再実行しても安全（冪等）。
-実行ユーザー・実行パスが前提と異なる場合は警告が出るので、指示に従って
-Raspberry Pi Imagerでの設定をやり直すか、確認の上で続行するか判断すること。
+systemdユニット・udevルールが一通りセットアップされ、最後に再起動するか確認される。
+再実行しても安全（冪等）。実行ユーザー・実行パスが前提と異なる場合は警告が出るので、
+指示に従ってRaspberry Pi Imagerでの設定をやり直すか、確認の上で続行するか判断すること。
+
+既にリポジトリをclone済みで`pophug-install.sh`だけを単体で使いたい場合
+（`git pull`後の再インストール等）は、`pophug-bootstrap.sh`を経由せず
+リポジトリの中から直接実行してもよい。
+
+```bash
+cd pophug-signage
+git pull
+bash pophug-install.sh
+```
 
 再起動後は次の「複数台セットアップ時の…」で説明する初回起動処理が自動的に走る。
 
@@ -621,6 +638,7 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
+| 4.31.1 | 個別インストールの入口スクリプト`pophug-bootstrap.sh`を追加。リポジトリのclone〜`pophug-install.sh`の実行〜再起動確認までを1本にまとめ、実質2行で個別インストールが完結するように |
 | 4.31.0 | 【新機能】個別インストール用ブートストラップスクリプト`pophug-install.sh`を追加。量産マスターイメージでの一括複製に頼らず、中古Pi等を1台ずつセットアップする運用に対応。分散していたインストール手順を1コマンドに統合、実行ユーザー・パスの前提条件を検証 |
 | 4.30.1 | USB設定ファイルの適用結果通知を改善。以前は件数のみだった通知に、実際に適用した項目（キー=値）と反映されなかった項目・理由を具体的に表示するよう変更。本体画面だけで「何が変わり何が変わらなかったか」が分かるように |
 | 4.30.0 | 【新機能】USBメモリー直下の「pophug-settings.txt」（key = value形式）から、Web設定画面と同じ設定項目を設定可能に。複数台への一括設定配布を想定し、画像取り込みと同様に確認なしで自動適用。検証ロジックはWeb側の/settingsルートと完全共有 |
