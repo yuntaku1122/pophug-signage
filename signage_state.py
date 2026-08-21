@@ -258,6 +258,7 @@ def settings_mtime(image_folder):
 # 設定値の妥当な範囲・選択肢（Web設定画面／USB設定ファイルの両方で共有する基準）
 VALID_TRANSITION_TYPES = ("fade", "slide_left", "slide_right", "slide_up", "slide_down")
 VALID_ROTATIONS = (0, 90, 180, 270)
+VALID_IMAGE_FIT_MODES = ("contain", "cover", "stretch")
 
 
 def validate_settings_updates(raw_values):
@@ -300,6 +301,13 @@ def validate_settings_updates(raw_values):
             valid["transition_type"] = v
         else:
             errors.append(("transition_type", f"{'/'.join(VALID_TRANSITION_TYPES)} のいずれかで指定してください"))
+
+    if "image_fit_mode" in raw_values:
+        v = str(raw_values["image_fit_mode"]).strip()
+        if v in VALID_IMAGE_FIT_MODES:
+            valid["image_fit_mode"] = v
+        else:
+            errors.append(("image_fit_mode", f"{'/'.join(VALID_IMAGE_FIT_MODES)} のいずれかで指定してください"))
 
     if "rotation" in raw_values:
         try:

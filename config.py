@@ -36,7 +36,9 @@ PRIORITY_INTERVAL = 5         # 通常画像を何枚表示するごとに優先
 #   "stretch" = アスペクト比を無視して画面ぴったりに引き伸ばす（余白・トリミングなし）
 #   "contain" = 画像全体が欠けずに収まるよう縮小（余白は下のBG_COLORで塗る）
 #   "cover"   = 画面いっぱいに敷き詰め、はみ出た部分はトリミング
-IMAGE_FIT_MODE = "stretch"
+# Web設定画面・USB設定ファイル(pophug-settings.txt)の両方から変更できる
+# （images/.settings.jsonに保存された値が優先され、この値は未設定時の初期値）。
+IMAGE_FIT_MODE = "contain"
 BG_COLOR = (0, 0, 0)         # contain/coverモードで余白が出た場合の色
 
 # ワイヤレスアップロードサーバー設定

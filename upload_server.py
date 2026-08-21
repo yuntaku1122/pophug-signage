@@ -52,6 +52,11 @@ except ImportError:
     DEFAULT_TRANSITION_TYPE = "fade"
 
 try:
+    from config import IMAGE_FIT_MODE as DEFAULT_IMAGE_FIT_MODE
+except ImportError:
+    DEFAULT_IMAGE_FIT_MODE = "contain"
+
+try:
     from config import PRIORITY_INTERVAL as DEFAULT_PRIORITY_INTERVAL
 except ImportError:
     DEFAULT_PRIORITY_INTERVAL = 5
@@ -68,6 +73,12 @@ TRANSITION_TYPE_LABELS = {
     "slide_right": "右にスワイプ（左→右）",
     "slide_up": "上にスワイプ（下→上）",
     "slide_down": "下にスワイプ（上→下）",
+}
+
+IMAGE_FIT_MODE_LABELS = {
+    "contain": "余白あり（縦横比を保ったまま最大表示）★推奨",
+    "cover": "余白なし（画面いっぱいに敷き詰め、はみ出た部分はトリミング）",
+    "stretch": "引き伸ばし（縦横比を無視して画面ぴったりに変形）",
 }
 
 # シャットダウン実行コマンド。pophugユーザーがパスワード無しで実行できるよう
@@ -202,6 +213,15 @@ UPLOAD_PAGE = """
         __TRANSITION_TYPE_OPTIONS__
       </select>
       <p class="setting-status" id="transition-type-status"></p>
+    </div>
+    <div class="setting-row">
+      <label>画像の表示方式</label>
+      <select id="image-fit-mode-select">
+        __IMAGE_FIT_MODE_OPTIONS__
+      </select>
+      <p class="hint" style="margin:4px 0 0;">推奨サイズ（縦長9:16程度）と違う縦横比の写真を入れても、
+        「余白あり」なら写真が伸び縮みせず、欠けずに収まります。</p>
+      <p class="setting-status" id="image-fit-mode-status"></p>
     </div>
   </div>
 
@@ -465,6 +485,7 @@ UPLOAD_PAGE = """
   }
 
   setupSelect('transition-type-select', 'transition-type-status', 'transition_type');
+  setupSelect('image-fit-mode-select', 'image-fit-mode-status', 'image_fit_mode');
   </script>
 
   <script>
@@ -721,6 +742,14 @@ def render_gallery_item(filename, is_hidden, priority_tag, is_pinned=False):
 def render_transition_type_options(current):
     opts = []
     for value, label in TRANSITION_TYPE_LABELS.items():
+        selected = " selected" if value == current else ""
+        opts.append(f'<option value="{value}"{selected}>{label}</option>')
+    return "".join(opts)
+
+
+def render_image_fit_mode_options(current):
+    opts = []
+    for value, label in IMAGE_FIT_MODE_LABELS.items():
         selected = " selected" if value == current else ""
         opts.append(f'<option value="{value}"{selected}>{label}</option>')
     return "".join(opts)
@@ -1033,12 +1062,14 @@ def create_app(image_folder):
             "transition_type": DEFAULT_TRANSITION_TYPE,
             "rotation": DEFAULT_ROTATION,
             "priority_interval": DEFAULT_PRIORITY_INTERVAL,
+            "image_fit_mode": DEFAULT_IMAGE_FIT_MODE,
         })
         transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
         image_interval = int(round(float(settings.get("image_interval", DEFAULT_IMAGE_INTERVAL))))
         transition_type = settings.get("transition_type", DEFAULT_TRANSITION_TYPE)
         rotation = int(settings.get("rotation", DEFAULT_ROTATION)) % 360
         priority_interval = int(round(float(settings.get("priority_interval", DEFAULT_PRIORITY_INTERVAL))))
+        image_fit_mode = settings.get("image_fit_mode", DEFAULT_IMAGE_FIT_MODE)
 
         current_conn = wifi_setup.current_connection_info()
         network_mode_labels = {
@@ -1056,6 +1087,7 @@ def create_app(image_folder):
                 .replace("__TRANSITION_DURATION__", transition_duration)
                 .replace("__IMAGE_INTERVAL__", str(image_interval))
                 .replace("__TRANSITION_TYPE_OPTIONS__", render_transition_type_options(transition_type))
+                .replace("__IMAGE_FIT_MODE_OPTIONS__", render_image_fit_mode_options(image_fit_mode))
                 .replace("__PRIORITY_INTERVAL__", str(priority_interval))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__CURRENT_VERSION__", __version__)
@@ -1184,7 +1216,7 @@ def create_app(image_folder):
         raw = {
             key: request.form.get(key)
             for key in ("transition_duration", "image_interval", "priority_interval",
-                        "transition_type", "setup_ap_ssid", "setup_ap_password")
+                        "transition_type", "image_fit_mode", "setup_ap_ssid", "setup_ap_password")
             if key in request.form
         }
         if not raw:
@@ -1201,6 +1233,7 @@ def create_app(image_folder):
             "transition_type": DEFAULT_TRANSITION_TYPE,
             "rotation": DEFAULT_ROTATION,
             "priority_interval": DEFAULT_PRIORITY_INTERVAL,
+            "image_fit_mode": DEFAULT_IMAGE_FIT_MODE,
             "setup_ap_ssid": wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX),
             "setup_ap_password": WIFI_SETUP_DEFAULT_PASSWORD,
         }

@@ -211,6 +211,7 @@ class PopSignage:
             "image_interval": IMAGE_INTERVAL,
             "transition_type": TRANSITION_TYPE,
             "rotation": ROTATE_SCREEN,
+            "image_fit_mode": IMAGE_FIT_MODE,
         })
 
         new_duration = settings.get("transition_duration", TRANSITION_DURATION)
@@ -227,6 +228,20 @@ class PopSignage:
         if new_type != globals().get("TRANSITION_TYPE"):
             globals()["TRANSITION_TYPE"] = new_type
             log(f"トランジションの種類を更新: {new_type}")
+
+        new_fit_mode = settings.get("image_fit_mode", IMAGE_FIT_MODE)
+        if new_fit_mode != globals().get("IMAGE_FIT_MODE"):
+            globals()["IMAGE_FIT_MODE"] = new_fit_mode
+            log(f"画像の表示方式を更新: {new_fit_mode}")
+            # _fit_image()の結果（余白の有無・トリミング範囲）は画像ごとにキャッシュ
+            # されているため、表示方式が変わった場合は全て破棄して再デコードさせる
+            # （ファイル自体は変わっていないので、mtimeベースの再利用ロジックだけでは
+            # 古い表示方式のキャッシュが使われ続けてしまう）
+            with self._lock:
+                self._image_cache = {}
+                self._image_mtimes = {}
+                self._image_state_key = None
+            self.load_pop_images(initial=True)
 
         new_rotation = settings.get("rotation", ROTATE_SCREEN)
         if new_rotation != globals().get("ROTATE_SCREEN"):
