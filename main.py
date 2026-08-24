@@ -135,6 +135,13 @@ class PopSignage:
         self.notice_hide_time = 0
         self.notice_lines = []  # 通知バナーの各行のSurface（折り返し済み）
 
+        # USBメモリーに読み込める画像・アップデートパッケージ・設定ファイルが
+        # 何も無かった場合の専有画面（USBメモリーが抜かれるまで表示し続ける）。
+        # 小さなバナー通知とは別の独立した状態として持ち、NOTICE_STICKY_MAX_SECONDS
+        # のような時間上限を設けない（抜くまで＝clear_notice()が呼ばれるまで消えない）。
+        self._fullscreen_notice_active = False
+        self._fullscreen_notice_message = ""
+
         self.qr_active = False        # QRコードオーバーレイの表示中フラグ
         self.qr_hide_time = 0
         self.qr_surface = None
@@ -725,14 +732,28 @@ class PopSignage:
             self._qr_pause_start = None
         self.qr_active = False
 
-    def _show_notice(self, message, sticky=False):
+    def _show_notice(self, message, sticky=False, fullscreen=False):
         """Web側の操作結果を、サイネージ画面上部にバナー表示する。
         スライドショー自体は止めない（QRのように操作を待つものではなく、
         あくまで「今こういう操作がありました」という控えめな通知のため）。
         sticky=Trueの時は「取り外すまで表示」系の通知として、通常より長く
         （NOTICE_STICKY_MAX_SECONDSを上限に）表示し続ける。
         長いメッセージ（USB取り込み完了時の詳細な内訳など）でも画面からはみ出さない
-        よう、1行の大きさを固定して複数行に折り返す（取扱説明画面と同じ方式）。"""
+        よう、1行の大きさを固定して複数行に折り返す（取扱説明画面と同じ方式）。
+
+        fullscreen=Trueの時は、小さなバナーではなく黒背景に大きな文字で画面全体を
+        占有する専有画面として表示する（USBメモリーに読み込める内容が何も無かった
+        場合など、見落とされては困る通知向け）。時間上限は設けず、USBメモリーが
+        抜かれてclear_notice()が呼ばれるまで表示し続ける。"""
+        self._fullscreen_notice_active = fullscreen
+        self._fullscreen_notice_message = message if fullscreen else ""
+        if fullscreen:
+            # バナー側の状態は使わないため、念のためクリアしておく
+            self.notice_lines = []
+            self.notice_hide_time = 0
+            log(f"サイネージ画面に全画面通知を表示: {message}")
+            return
+
         max_width = self.canvas.get_width() - 64
         font = get_japanese_font(22)
         self.notice_lines = [
@@ -744,9 +765,12 @@ class PopSignage:
         log(f"サイネージ画面に通知を表示: {message}" + ("（sticky）" if sticky else ""))
 
     def _hide_notice(self):
-        """表示中の通知バナーを即座に消す（USBメモリー取り外し検知など）"""
+        """表示中の通知（バナー・全画面のどちらも）を即座に消す
+        （USBメモリー取り外し検知など）"""
         self.notice_lines = []
         self.notice_hide_time = 0
+        self._fullscreen_notice_active = False
+        self._fullscreen_notice_message = ""
 
     def draw_notice_overlay(self):
         if time.time() >= self.notice_hide_time or not self.notice_lines:
@@ -768,6 +792,41 @@ class PopSignage:
         for surf in self.notice_lines:
             self.canvas.blit(surf, (box_x + box_w // 2 - surf.get_width() // 2, y))
             y += surf.get_height() + line_gap
+
+    def draw_fullscreen_notice(self):
+        """USBメモリーに読み込める画像・アップデートパッケージ・設定ファイルが
+        何も無かった場合の専有画面。黒背景に大きな文字でメッセージを表示し、
+        USBメモリーが抜かれる（clear_notice()が呼ばれる）まで表示し続ける。
+        小さなバナー通知(draw_notice_overlay)と違い見落とされてはならない
+        通知のため、画面全体を占有する。"""
+        self.canvas.fill((0, 0, 0))
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
+        message = self._fullscreen_notice_message or ""
+        max_width = w - 80
+        max_height = h - 80
+
+        font_size = 44
+        font = get_japanese_font(font_size)
+        lines = self._wrap_text_lines(message, font, max_width)
+        # 行数が多い（＝メッセージが長い）場合、画面の縦幅に収まるまで
+        # フォントサイズを段階的に縮小する
+        while font_size > 16:
+            line_height = font.get_height()
+            total_h = line_height * len(lines) + 14 * (len(lines) - 1)
+            if total_h <= max_height:
+                break
+            font_size -= 2
+            font = get_japanese_font(font_size)
+            lines = self._wrap_text_lines(message, font, max_width)
+
+        line_height = font.get_height()
+        total_h = line_height * len(lines) + 14 * (len(lines) - 1)
+        y = h // 2 - total_h // 2
+        for line in lines:
+            surf = font.render(line, True, (255, 215, 100))
+            self.canvas.blit(surf, (w // 2 - surf.get_width() // 2, y))
+            y += line_height + 14
 
     def draw_usb_update_badge(self):
         """USBアップデートパッケージが確定待ちの間、画面下部に控えめなバッジを
@@ -1413,10 +1472,11 @@ class PopSignage:
                         self.last_notice_mtime = current_notice_mtime
                         notice = load_notice(IMAGE_FOLDER)
                         if notice and notice.get("message"):
-                            self._show_notice(notice["message"], sticky=notice.get("sticky", False))
+                            self._show_notice(notice["message"], sticky=notice.get("sticky", False),
+                                               fullscreen=notice.get("fullscreen", False))
                         else:
                             # 通知ファイルが削除された（USBメモリー取り外し検知等）
-                            # ＝表示中のsticky通知を即座に消す合図
+                            # ＝表示中のsticky通知（全画面のものも含む）を即座に消す合図
                             self._hide_notice()
 
                     # Web側で保存済みWi-Fi情報を削除するなど、接続状態が変わりうる
@@ -1496,6 +1556,13 @@ class PopSignage:
                     self.draw_wifi_setup_screen()
                 elif self.manual_active:
                     self.draw_manual_screen()
+                elif self._fullscreen_notice_active:
+                    # USBメモリーに読み込める内容が何も無かった場合の専有画面。
+                    # ボタン操作（QR表示等）よりは優先度を落とし、Wi-Fiセットアップ・
+                    # 取扱説明のような能動的な操作モードよりは低い位置に置いている
+                    # （それらは明示的にユーザーが呼び出した操作のため優先させる）。
+                    # USBメモリーが抜かれるまで表示され続ける
+                    self.draw_fullscreen_notice()
                 else:
                     self.draw_pop_mode()
                     if self.qr_active:

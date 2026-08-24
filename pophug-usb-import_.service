@@ -1,0 +1,8 @@
+[Unit]
+Description=pophug: USBメモリー挿入時の画像自動取り込み (%i)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pophug-usb-import %i
+TimeoutStartSec=90

@@ -404,14 +404,21 @@ def _notice_path(image_folder):
     return os.path.join(image_folder, ".notice.json")
 
 
-def save_notice(image_folder, message, sticky=False):
+def save_notice(image_folder, message, sticky=False, fullscreen=False):
     """サイネージ画面に一時表示するメッセージを保存する。
-    sticky=Trueの場合、main.py側は「取り外すまで表示し続けたい」通知として扱う
+    sticky=Trueの場合、main.py側は「取り外すまで表示」系の通知として扱う
     （USBメモリー取り込み完了時など）。実際に消すのはclear_notice()を呼んだ時、
-    または上限時間（NOTICE_STICKY_MAX_SECONDS）に達した時。"""
+    または上限時間（NOTICE_STICKY_MAX_SECONDS）に達した時。
+    fullscreen=Trueの場合、main.py側は小さなバナーではなく黒背景に大きな文字の
+    専有画面として表示する（USBメモリーに読み込める内容が何も無かった場合など、
+    見落とされては困る通知向け）。この場合は時間上限も設けられず、
+    clear_notice()が呼ばれるまで（＝USBメモリーが抜かれるまで）表示し続ける。"""
     path = _notice_path(image_folder)
     with _lock:
-        _atomic_write_json(path, {"message": message, "ts": time.time(), "sticky": bool(sticky)})
+        _atomic_write_json(path, {
+            "message": message, "ts": time.time(),
+            "sticky": bool(sticky), "fullscreen": bool(fullscreen),
+        })
 
 
 def clear_notice(image_folder):

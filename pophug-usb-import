@@ -282,10 +282,11 @@ def import_images(source_dir, image_folder, ts=None):
         candidates.append((name, full, ext))
 
     if not candidates:
-        error = ("USBメモリーに取り込める画像が見つかりませんでした"
-                  if skipped_non_image == 0 else
-                  "USBメモリーに取り込める画像が見つかりませんでした"
-                  f"（{skipped_non_image}件は画像として認識できずスキップしました）")
+        error = ("USBメモリーの直下（一番上の階層）に、取り込める画像が見つかりませんでした。"
+                  "サブフォルダの中に置いた画像は読み込めません。USBメモリーの直下に"
+                  "直接コピーしてください。"
+                  + (f"（{skipped_non_image}件は画像として認識できずスキップしました）"
+                     if skipped_non_image else ""))
         return {**empty_result, "error": error}
 
     imported_hashes = signage_state.load_usb_imported(image_folder)
@@ -661,24 +662,36 @@ def handle_add(device_name):
         unmount()
 
     # 画像の取り込み結果・アップデートパッケージの検出結果・設定ファイルの
-    # 適用結果、3つとも同時に起こり得るためそれぞれ独立に組み立てて連結する。
-    # 画像が1枚も無かった（result["error"]）場合でも、アップデートや設定だけを
-    # 持ってきたUSBという可能性があるため、その時は画像側のエラー文言は出さない。
+    # 適用結果、3つとも同時に起こり得る。何か1つでも見つかっていれば通常の
+    # （抜くまで表示され続ける）バナー通知で内訳を伝える。
+    found_anything = bool(result["imported"] or result["restored"] or update_message or settings_message)
+
+    if not found_anything:
+        # 画像・アップデートパッケージ・設定ファイルのいずれも見つからなかった
+        # （USBが空・非対応形式のみ・トップレベルではなくサブフォルダの中に
+        # 置いてしまっている、等）。「USBメモリーの直下に置かないと読み込めない」
+        # という、最もよくあるつまずきポイントを見落とされないよう、小さな
+        # バナーではなく黒背景に大きな文字の専有画面として表示する
+        # （USBメモリーが抜かれるまで消えない）。result["error"]には
+        # import_images側で組み立てた、状況に応じた具体的な理由（読み込み失敗の
+        # 詳細等）が入っていることもあるため、それがあれば優先して使う。
+        message = result["error"] or (
+            "USBメモリーの直下に画像ファイルがありません。"
+            "画像・アップデートパッケージ・設定ファイルは、"
+            "USBメモリーの一番上の階層（フォルダの外）に直接置いてください。"
+        )
+        signage_state.save_notice(IMAGE_FOLDER, message, sticky=True, fullscreen=True)
+        fix_ownership(IMAGE_FOLDER)
+        log(message)
+        return
+
     parts = []
     if result["imported"] or result["restored"]:
         parts.append(build_notice_message(result))
-    elif result["error"] and not (update_message or settings_message):
-        parts.append(result["error"])
-    elif result["error"]:
-        log(f"画像の取り込みは無し（他の項目のみ検出）: {result['error']}")
-
     if update_message:
         parts.append(update_message)
     if settings_message:
         parts.append(settings_message)
-
-    if not parts:
-        parts.append("USBメモリーに取り込める画像もアップデートパッケージも設定ファイルも見つかりませんでした")
 
     message = "　".join(parts)
     # 取り込み結果に関わらず、USBを抜いてよいタイミングをユーザーが見て
