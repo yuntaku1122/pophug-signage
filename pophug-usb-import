@@ -661,42 +661,45 @@ def handle_add(device_name):
     finally:
         unmount()
 
-    # 画像の取り込み結果・アップデートパッケージの検出結果・設定ファイルの
-    # 適用結果、3つとも同時に起こり得る。何か1つでも見つかっていれば通常の
-    # （抜くまで表示され続ける）バナー通知で内訳を伝える。
-    found_anything = bool(result["imported"] or result["restored"] or update_message or settings_message)
+    # 写真が1枚も無い（＝スライドショー自体には見た目の変化が起きない）USBの場合、
+    # 「完全に空」「アップデートパッケージのみ」「設定ファイルのみ」「それらの
+    # 組み合わせ」のどのケースでも、その場にいる人が確認できる情報は画面の通知
+    # だけになる。理由が何であれ、写真が見つからなかった場合は同じ重みで
+    # フルスクリーン表示にする（アップデート検出だけ小さなバナーのままだと、
+    # 「本体ボタンの長押しで適用できます」という重要な案内が見落とされかねないため）。
+    # 逆に写真が見つかった場合は、スライドショーの変化自体が「成功した」ことを
+    # 物語るので、画面を専有するほどではない控えめなバナーのままにする。
+    have_images = bool(result["imported"] or result["restored"])
 
-    if not found_anything:
-        # 画像・アップデートパッケージ・設定ファイルのいずれも見つからなかった
-        # （USBが空・非対応形式のみ・トップレベルではなくサブフォルダの中に
-        # 置いてしまっている、等）。「USBメモリーの直下に置かないと読み込めない」
-        # という、最もよくあるつまずきポイントを見落とされないよう、小さな
-        # バナーではなく黒背景に大きな文字の専有画面として表示する
-        # （USBメモリーが抜かれるまで消えない）。result["error"]には
-        # import_images側で組み立てた、状況に応じた具体的な理由（読み込み失敗の
-        # 詳細等）が入っていることもあるため、それがあれば優先して使う。
-        message = result["error"] or (
-            "USBメモリーの直下に画像ファイルがありません。"
-            "画像・アップデートパッケージ・設定ファイルは、"
-            "USBメモリーの一番上の階層（フォルダの外）に直接置いてください。"
-        )
+    if have_images:
+        parts = [build_notice_message(result)]
+        if update_message:
+            parts.append(update_message)
+        if settings_message:
+            parts.append(settings_message)
+        message = "　".join(parts)
+        signage_state.save_notice(IMAGE_FOLDER, message, sticky=True)
+    else:
+        parts = []
+        if update_message:
+            parts.append(update_message)
+        if settings_message:
+            parts.append(settings_message)
+        if parts:
+            message = "　".join(parts)
+        else:
+            # 画像・アップデートパッケージ・設定ファイルのいずれも見つからなかった
+            # （USBが空・非対応形式のみ・トップレベルではなくサブフォルダの中に
+            # 置いてしまっている、等）。result["error"]には状況に応じた具体的な
+            # 理由（読み込み失敗の詳細等）が入っていることもあるため、それが
+            # あれば優先して使う。
+            message = result["error"] or (
+                "USBメモリーの直下に画像ファイルがありません。"
+                "画像・アップデートパッケージ・設定ファイルは、"
+                "USBメモリーの一番上の階層（フォルダの外）に直接置いてください。"
+            )
         signage_state.save_notice(IMAGE_FOLDER, message, sticky=True, fullscreen=True)
-        fix_ownership(IMAGE_FOLDER)
-        log(message)
-        return
 
-    parts = []
-    if result["imported"] or result["restored"]:
-        parts.append(build_notice_message(result))
-    if update_message:
-        parts.append(update_message)
-    if settings_message:
-        parts.append(settings_message)
-
-    message = "　".join(parts)
-    # 取り込み結果に関わらず、USBを抜いてよいタイミングをユーザーが見て
-    # 判断できるよう、抜くまで（handle_removalが呼ばれるまで）表示し続ける
-    signage_state.save_notice(IMAGE_FOLDER, message, sticky=True)
     fix_ownership(IMAGE_FOLDER)
     log(message)
 
