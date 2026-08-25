@@ -538,6 +538,10 @@ UPLOAD_PAGE = """
       <button type="button" id="apply-update-btn">アップデートする</button>
     </div>
     <p class="setting-status" id="update-status"></p>
+    <details style="margin-top:12px;">
+      <summary style="cursor:pointer;">アップデート履歴</summary>
+      __UPDATE_HISTORY_HTML__
+    </details>
   </div>
 
   <script>
@@ -753,6 +757,50 @@ def render_image_fit_mode_options(current):
         selected = " selected" if value == current else ""
         opts.append(f'<option value="{value}"{selected}>{label}</option>')
     return "".join(opts)
+
+
+def render_update_history(history):
+    """アップデート履歴（update_check.read_history()の戻り値）を、Web設定画面の
+    「アップデート」欄に表示するHTMLテーブルへ変換する。ブラウザタブを開きっぱなしに
+    していなくても、再起動後にページを開くだけで過去のアップデート結果（成功/失敗と
+    その理由）を確認できるようにするためのもの。オンラインOTA・USBオフライン
+    アップデートのどちらの結果もここに同じ形式で表示される。"""
+    if not history:
+        return '<p class="hint" style="margin-top:8px;">まだアップデート履歴がありません。</p>'
+
+    rows = []
+    for entry in history:
+        try:
+            dt = datetime.fromtimestamp(entry.get("ts")).strftime("%Y/%m/%d %H:%M")
+        except (TypeError, ValueError, OSError):
+            dt = "-"
+        from_v = entry.get("from_version") or "?"
+        target_v = entry.get("target_version") or "?"
+        if entry.get("state") == "success":
+            result_html = '<span style="color:#2e7d32;">✓ 成功</span>'
+        else:
+            result_html = '<span style="color:#c62828;">✗ 失敗</span>'
+        error = entry.get("error")
+        detail = _h(error) if error else ""
+        rows.append(
+            "<tr>"
+            f"<td>{_h(dt)}</td>"
+            f"<td>v{_h(from_v)} → v{_h(target_v)}</td>"
+            f"<td>{result_html}</td>"
+            f"<td>{detail}</td>"
+            "</tr>"
+        )
+
+    return (
+        '<table class="update-history-table" style="width:100%; border-collapse:collapse; margin-top:8px; font-size:0.9em;">'
+        '<thead><tr>'
+        '<th style="text-align:left; border-bottom:1px solid #ccc; padding:4px;">日時</th>'
+        '<th style="text-align:left; border-bottom:1px solid #ccc; padding:4px;">バージョン</th>'
+        '<th style="text-align:left; border-bottom:1px solid #ccc; padding:4px;">結果</th>'
+        '<th style="text-align:left; border-bottom:1px solid #ccc; padding:4px;">詳細</th>'
+        '</tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+    )
 
 
 WIFI_SETUP_PAGE = """
@@ -1092,6 +1140,7 @@ def create_app(image_folder):
                 .replace("__ROTATION__", str(rotation))
                 .replace("__CURRENT_VERSION__", __version__)
                 .replace("__HOSTNAME__", socket.gethostname())
+                .replace("__UPDATE_HISTORY_HTML__", render_update_history(update_check.read_history()))
                 .replace("__NETWORK_MODE_LABEL__", network_mode_label)
                 .replace("__GALLERY__", gallery_html)
                 .replace("__VERSION__", __version__))

@@ -35,6 +35,8 @@ from version import __version__
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 UPDATE_APPLY_PATH = "/usr/local/bin/pophug-update-apply"
 STATUS_PATH = os.path.join(APP_DIR, "images", ".update_status.json")
+HISTORY_PATH = os.path.join(APP_DIR, "images", ".update_history.json")
+HISTORY_MAX_ENTRIES = 10  # 直近何件まで保持するか（無制限に増やさないための上限）
 
 # 更新時に上書きしない（お客さんごとのデータ・環境なので温存する）もの
 PRESERVE = {"images", "venv", ".git", "__pycache__"}
@@ -49,7 +51,9 @@ def log(msg):
 def _write_status(state, error=None, target_version=None):
     """進行状況をファイルに書き込む。プロセスが再起動で死んでも、
     次のプロセスがこのファイルを読めば正しい状態を継続して報告できる。
-    書き込み失敗自体でアップデート処理を止めないよう、例外は握りつぶす。"""
+    書き込み失敗自体でアップデート処理を止めないよう、例外は握りつぶす。
+    state が success/failed（＝そのアップデート試行の最終結果）になった時点で、
+    履歴ファイルにも1件追記する（"applying"の間は中間状態なので記録しない）。"""
     try:
         os.makedirs(os.path.dirname(STATUS_PATH), exist_ok=True)
         data = {
@@ -67,6 +71,9 @@ def _write_status(state, error=None, target_version=None):
     except Exception as e:
         log(f"状態ファイルの書き込みに失敗しました（無視して続行）: {e}")
 
+    if state in ("success", "failed"):
+        _append_history(state, error, target_version)
+
 
 def read_status():
     """現在のアップデート進行状況を返す（Web側のポーリングから呼ばれる）"""
@@ -75,6 +82,58 @@ def read_status():
             return json.load(f)
     except Exception:
         return {"state": "idle", "error": None, "version": None}
+
+
+def _append_history(state, error, target_version):
+    """アップデート試行の結果（成功/失敗）を履歴として蓄積する。
+    .update_status.json（今の状態1件だけを常に上書き）と違い、こちらは
+    直近HISTORY_MAX_ENTRIES件を保持し、ブラウザタブを開きっぱなしにしていなくても、
+    再起動後にあらためてWeb設定画面を開くだけで過去のアップデート結果（成功/失敗と
+    その理由）を確認できるようにするためのもの。オンラインOTA・USBオフライン
+    アップデートのどちらも同じ_swap_and_finish()を通るため、この履歴には両方の
+    実行結果が同じ場所に記録される。
+    書き込み失敗自体でアップデート処理を止めないよう、例外は握りつぶす。"""
+    entry = {
+        "ts": time.time(),
+        "state": state,
+        "target_version": target_version,
+        "from_version": __version__,  # このプロセスが起動した時点のバージョン
+        "error": error,
+    }
+    try:
+        os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+        try:
+            with open(HISTORY_PATH, encoding="utf-8") as f:
+                history = json.load(f)
+            if not isinstance(history, list):
+                history = []
+        except (OSError, json.JSONDecodeError):
+            history = []
+
+        history.append(entry)
+        history = history[-HISTORY_MAX_ENTRIES:]
+
+        tmp_path = HISTORY_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, HISTORY_PATH)
+    except Exception as e:
+        log(f"アップデート履歴の書き込みに失敗しました（無視して続行）: {e}")
+
+
+def read_history():
+    """アップデート履歴を新しい順（直近のものが先頭）で返す。
+    ファイルが無い・壊れている場合は空リストを返す（Web側の表示を壊さないため）。"""
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as f:
+            history = json.load(f)
+        if not isinstance(history, list):
+            return []
+    except (OSError, json.JSONDecodeError):
+        return []
+    return list(reversed(history))
 
 
 def _parse_version(v):
