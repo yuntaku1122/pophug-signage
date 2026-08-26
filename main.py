@@ -483,8 +483,15 @@ class PopSignage:
             return
 
         if self.manual_active:
-            # 取扱説明の表示中は、押した時間に関わらず閉じる操作として扱う
-            self.toggle_manual()
+            # 取扱説明の表示中でも、SHUTDOWN_HOLD_SECONDS以上の長押しだけは
+            # シャットダウンとして扱う（説明書を見ながら片付けたい場面で
+            # シャットダウンできないのは不便なため）。_trigger_button_shutdown()
+            # は内部でmanual_activeをFalseに戻すので、そのまま呼んでよい。
+            # それ未満の押下は、従来通り押した時間に関わらず「閉じる」操作として扱う。
+            if held_seconds >= SHUTDOWN_HOLD_SECONDS:
+                self._trigger_button_shutdown()
+            else:
+                self.toggle_manual()
             return
 
         if self.usb_update_pending:
@@ -647,7 +654,17 @@ class PopSignage:
         overlay.fill((10, 10, 10))
         self.canvas.blit(overlay, (0, 0))
 
-        if self.usb_update_pending:
+        if self.manual_active:
+            # 取扱説明の表示中は、通常の5段階ラダーではなく「シャットダウンか、
+            # 閉じるか」の2択だけを見せる（_handle_button_release側の分岐と対応させる）
+            if held >= SHUTDOWN_HOLD_SECONDS:
+                text = "離すとシャットダウンします"
+                color = (255, 90, 90)
+            else:
+                remaining = SHUTDOWN_HOLD_SECONDS - held
+                text = f"長押し中...あと{remaining:.1f}秒でシャットダウン（今離すと閉じます）"
+                color = (255, 255, 255)
+        elif self.usb_update_pending:
             # 保留中のUSBアップデートがある間は、通常のラダー（取扱説明～
             # シャットダウン）を丸ごと無視し、確定/見送りの進捗だけを見せる
             version = self.usb_update_pending.get("version", "?")
@@ -1556,6 +1573,7 @@ class PopSignage:
                     self.draw_wifi_setup_screen()
                 elif self.manual_active:
                     self.draw_manual_screen()
+                    self.draw_button_hold_overlay()
                 elif self._fullscreen_notice_active:
                     # USBメモリーに読み込める内容が何も無かった場合の専有画面。
                     # ボタン操作（QR表示等）よりは優先度を落とし、Wi-Fiセットアップ・
