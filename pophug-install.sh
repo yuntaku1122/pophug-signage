@@ -5,7 +5,8 @@
 # まっさらなRaspberry Pi OS（Pi Zero 2W H・Pi 3B等、機種を問わない）に対して、
 # pophug-signageの動作に必要なインストール作業を1回で行うブートストラップ
 # スクリプト。従来READMEに分散していた手順（venv構築・sudoers設定×3・
-# ヘルパースクリプト配置・systemdユニット登録・udevルール登録）を1本化した。
+# ヘルパースクリプト配置・systemdユニット登録・udevルール登録・CLI起動モードへの
+# 切り替え）を1本化した。
 #
 # 量産用マスターイメージを作らず、中古Pi等を1台ずつ個別にセットアップする
 # 運用を想定している（複製前提ではなく、まっさらな状態から素早く立ち上げる
@@ -30,9 +31,40 @@
 #   cd pophug-signage
 #   bash pophug-install.sh
 #   sudo reboot
+#
+# ご利用にあたっての注意（実体験から）:
+#   ・テザリング回線やPi Zero系の無線は不安定になりやすく、apt-get/pip install
+#     の途中でSSH接続そのものが切れることがある（このスクリプトはscreen経由で
+#     自動的に自分自身を再実行することでこれに対処しているので、通常は
+#     気にする必要は無い。詳細は下記の「SSH切断への耐性」を参照）
+#   ・OSやPythonのバージョンによっては、pygame等の事前ビルド済みパッケージ
+#     （wheel）が無く、ソースからのビルドが発生することがある。この場合、
+#     特にPi Zero系では数十分単位の時間がかかることがあるが、異常ではない
 # ============================================
 
 set -e
+
+# ---- SSH切断への耐性: screenセッション内での自動再実行 ----
+# pip install等、時間のかかる処理の途中でSSH接続が切れると、それまでの
+# 処理も道連れで中断されてしまう（テザリング回線・Pi Zero系の無線が不安定な
+# 環境で実際に発生した）。既にscreen/tmuxの中で動いている場合を除き、
+# 自動的にscreenセッションの中で自分自身を再実行する。SSHが繋がっている間は
+# 普段と全く同じ見た目で進み、途中でSSHが切れても処理自体は裏側で継続される
+# （screenはSIGHUPを受けても自動的にデタッチして生き残る仕様のため）。
+# 再接続後は `screen -r pophug-install` で状況を確認・復帰できる。
+if [ -z "${STY:-}" ] && [ -z "${TMUX:-}" ] && [ -z "${POPHUG_INSTALL_NO_SCREEN:-}" ]; then
+    if ! command -v screen > /dev/null 2>&1; then
+        echo "SSH切断への耐性のため、screenをインストールします..."
+        sudo apt-get update -qq
+        sudo apt-get install -y screen
+    fi
+    echo "screenセッション（pophug-install）内で実行します。"
+    echo "SSHが途中で切れても処理は継続されます。再接続後は次で状況を確認できます:"
+    echo "  screen -r pophug-install"
+    echo ""
+    export POPHUG_INSTALL_NO_SCREEN=1
+    exec screen -S pophug-install bash "$0" "$@"
+fi
 
 EXPECTED_DIR="/home/pophug/pophug-signage"
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -71,12 +103,12 @@ if [ "$APP_DIR" != "$EXPECTED_DIR" ]; then
 fi
 
 echo ""
-echo "--- 1/7: OSパッケージのインストール ---"
+echo "--- 1/8: OSパッケージのインストール ---"
 sudo apt-get update
 sudo apt-get install -y python3-venv python3-pip git exfatprogs
 
 echo ""
-echo "--- 2/7: Python仮想環境の構築 ---"
+echo "--- 2/8: Python仮想環境の構築 ---"
 if [ ! -d "$APP_DIR/venv" ]; then
     python3 -m venv "$APP_DIR/venv"
     echo "  venvを新規作成しました"
@@ -87,7 +119,7 @@ fi
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
 echo ""
-echo "--- 3/7: ヘルパースクリプトの配置（root所有・実行専用） ---"
+echo "--- 3/8: ヘルパースクリプトの配置（root所有・実行専用） ---"
 for script in pophug-netctl pophug-update-apply pophug-usb-import pophug-hostname-setup; do
     if [ ! -f "$APP_DIR/$script" ]; then
         echo "  ⚠ $script が見つからないためスキップします"
@@ -100,7 +132,7 @@ for script in pophug-netctl pophug-update-apply pophug-usb-import pophug-hostnam
 done
 
 echo ""
-echo "--- 4/7: sudoers設定（各ヘルパー単体だけをパスワード無しで許可） ---"
+echo "--- 4/8: sudoers設定（各ヘルパー単体だけをパスワード無しで許可） ---"
 SHUTDOWN_PATH="$(command -v shutdown)"
 echo "pophug ALL=(ALL) NOPASSWD: $SHUTDOWN_PATH -h now" | sudo tee /etc/sudoers.d/pophug-shutdown > /dev/null
 sudo chmod 440 /etc/sudoers.d/pophug-shutdown
@@ -117,7 +149,7 @@ echo "  ※ upload_server.pyのSHUTDOWN_COMMANDが上記のシャットダウン
 echo "    一致しているか、念のため確認しておくこと（$SHUTDOWN_PATH）"
 
 echo ""
-echo "--- 5/7: systemdユニットの配置 ---"
+echo "--- 5/8: systemdユニットの配置 ---"
 sudo cp "$APP_DIR/pophug-signage.service" /etc/systemd/system/
 sudo cp "$APP_DIR/pophug-hostname-setup.service" /etc/systemd/system/
 
@@ -135,12 +167,12 @@ else
 fi
 
 echo ""
-echo "--- 6/7: USBメモリー自動検出（udevルール）の設定 ---"
+echo "--- 6/8: USBメモリー自動検出（udevルール）の設定 ---"
 sudo cp "$APP_DIR/99-pophug-usb.rules" /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 
 echo ""
-echo "--- 7/7: サービスの有効化・GPIOアクセス権限の確認 ---"
+echo "--- 7/8: サービスの有効化・GPIOアクセス権限の確認 ---"
 sudo systemctl daemon-reload
 sudo systemctl enable pophug-hostname-setup.service
 sudo systemctl enable pophug-signage.service
@@ -158,19 +190,83 @@ for grp in gpio video render input dialout plugdev; do
 done
 
 echo ""
+echo "--- 8/8: 起動モードをCLI（コンソール）に設定 ---"
+# pophug-signageの画面描画はpygame+kmsdrmで、デスクトップ環境（X11等）を
+# 介さず直接画面（/dev/dri）を掴む方式のため、デスクトップ環境は本来不要。
+# CLIモード（multi-user.target）にしておくことで、デスクトップ環境の
+# 起動処理が丸ごと省かれ、起動が速くなりメモリ消費も減る
+# （Pi Zero系では特に効果がある）。また、デスクトップ環境が同時に起動して
+# いると、まれにkmsdrmとの画面（/dev/dri）の奪い合いが起きることがあるため、
+# その回避にもなる。
+# Desktop版のRaspberry Pi OSで書き込んでしまった場合でも、ここで自動的に
+# CLIモードへ切り替える（Lite版で最初からCLIモードの場合は何もしない）。
+CURRENT_BOOT_TARGET="$(systemctl get-default 2>/dev/null || echo "unknown")"
+if [ "$CURRENT_BOOT_TARGET" = "multi-user.target" ]; then
+    echo "  既にCLIモード（multi-user.target）です。変更はありません"
+elif [ "$CURRENT_BOOT_TARGET" = "graphical.target" ]; then
+    sudo systemctl set-default multi-user.target
+    echo "  デスクトップモード（graphical.target）からCLIモード（multi-user.target）に変更しました"
+    echo "  （元に戻したい場合: sudo systemctl set-default graphical.target）"
+else
+    echo "  ⚠ 現在の起動モード（$CURRENT_BOOT_TARGET）を認識できなかったため、変更をスキップしました"
+    echo "    手動で切り替えたい場合: sudo systemctl set-default multi-user.target"
+fi
+
+# ---- 再起動後の案内メッセージの組み立て ----
+# pophug-hostname-setupは「ホスト名が初期値 'pophug' のままかどうか」だけで
+# 動作を判定する。この個体が実際にどちらの状態かをここで確認し、
+# 案内メッセージの内容を出し分ける（初期化済みの機体に対して「初期化されます」
+# という警告を出すと、実際には何も起きないのに紛らわしいため）。
+CURRENT_HOSTNAME="$(hostname)"
+
+# 再起動後の新しいホスト名は、pophug-hostname-setup と全く同じロジック
+# （wlan0のMACアドレス下4桁を大文字化して付与）で、再起動前でも計算できる。
+FUTURE_HOSTNAME=""
+if [ -r /sys/class/net/wlan0/address ]; then
+    MAC="$(cat /sys/class/net/wlan0/address 2>/dev/null || true)"
+    if [ -n "$MAC" ]; then
+        SUFFIX="$(echo "$MAC" | tr -d ':' | tr '[:lower:]' '[:upper:]' | tail -c 5)"
+        FUTURE_HOSTNAME="pophug-${SUFFIX}"
+    fi
+fi
+
+echo ""
 echo "=== インストール完了 ==="
 echo ""
 echo "この後、以下を実行して再起動してください:"
 echo "  sudo reboot"
 echo ""
-echo "再起動時にpophug-hostname-setupが自動的に動作し、"
-echo "・ホスト名の個別化（pophug-XXXXのような形に変更）"
-echo "・保存済みWi-Fi情報の初期化"
-echo "・images/フォルダの初期化"
-echo "・ハードウェアウォッチドッグの有効化（設定変更を伴う場合は自動でもう一度再起動）"
-echo "が行われます。"
-echo ""
-echo "⚠ ホスト名が変わるとSSHの接続先も変わります。再起動後に"
-echo "  ssh pophug@pophug.local で繋がらない場合は、ルーターの接続機器一覧等で"
-echo "  新しいホスト名（pophug-XXXX）を確認し、ssh pophug@pophug-XXXX.local"
-echo "  で接続し直してください。"
+
+if [ "$CURRENT_HOSTNAME" = "pophug" ]; then
+    echo "現在ホスト名が初期値 'pophug' のままのため、再起動時にpophug-hostname-setupが"
+    echo "自動的に動作し、以下が行われます（複製直後・セットアップ直後の初回起動として"
+    echo "扱われるため）:"
+    echo "・ホスト名の個別化"
+    if [ -n "$FUTURE_HOSTNAME" ]; then
+        echo "    → 再起動後の新しいホスト名は次になる見込みです: $FUTURE_HOSTNAME"
+        echo "      （wlan0のMACアドレスから機械的に決まる値。念のため実際の値は"
+        echo "      起動後に確認すること）"
+    else
+        echo "    → wlan0が見つからず、新しいホスト名を事前に計算できませんでした"
+        echo "      （起動後、本体画面またはルーターの接続機器一覧で確認してください）"
+    fi
+    echo "・保存済みWi-Fi情報の初期化（今設定した接続用Wi-Fiの情報も消えます）"
+    echo "・images/フォルダの初期化"
+    echo "・ハードウェアウォッチドッグの有効化（設定変更を伴う場合は自動でもう一度再起動）"
+    echo ""
+    echo "⚠ ホスト名が変わるとSSHの接続先も変わります。再起動後に"
+    echo "  ssh pophug@pophug.local で繋がらない場合は、上記の新しいホスト名"
+    if [ -n "$FUTURE_HOSTNAME" ]; then
+        echo "  （$FUTURE_HOSTNAME）で以下のように接続し直してください:"
+        echo "    ssh pophug@${FUTURE_HOSTNAME}.local"
+    else
+        echo "  で ssh pophug@<新しいホスト名>.local として接続し直してください。"
+    fi
+else
+    echo "現在のホスト名（$CURRENT_HOSTNAME）はすでに初期値 'pophug' から変更済みのため、"
+    echo "pophug-hostname-setupの初期化処理（ホスト名変更・保存済みWi-Fi情報や"
+    echo "images/フォルダの初期化）は実行されません。"
+    echo ""
+    echo "→ 再起動してもSSHの接続先（$CURRENT_HOSTNAME）は変わらず、写真や"
+    echo "  Wi-Fi設定もそのまま残ります。安心して再起動してください。"
+fi
