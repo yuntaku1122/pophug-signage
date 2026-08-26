@@ -109,11 +109,29 @@ sudo apt-get install -y python3-venv python3-pip git exfatprogs
 
 echo ""
 echo "--- 2/8: Python仮想環境の構築 ---"
+# --system-site-packages 付きで作る。pygame・gpiozeroは、Raspberry Pi OSの
+# aptパッケージ版（python3-pygame等）がハードウェア（kmsdrmでの画面描画、
+# GPIOアクセス）向けに最適化されているのに対し、pipが取得するpygameは
+# 汎用ビルドの（やや古い）SDLを内蔵しており、新しいカーネルのDRM実装との
+# 組み合わせで「kmsdrm not available」となる相性問題が実機
+# （Raspberry Pi Zero 2 W、カーネル6.18系）で確認されている。
+# --system-site-packages を付けると、requirements.txt内のバージョン指定の
+# 無いpygame/gpiozeroは「システム版で既に満たされている」としてpipが
+# 再インストールをスキップするようになる（flask・qrcode等システムに
+# 無いものは、これまで通りpipでvenv内にインストールされる）。
+if [ -d "$APP_DIR/venv" ] && [ -f "$APP_DIR/venv/pyvenv.cfg" ] \
+        && grep -q "include-system-site-packages = false" "$APP_DIR/venv/pyvenv.cfg"; then
+    echo "  既存のvenvが --system-site-packages 無しで作られているため作り直します"
+    echo "  （pygameがシステム版ではなくpip版になり、上記のkmsdrm関連の不具合を"
+    echo "  引き起こすため。既存のvenv内に手動で追加したパッケージがあれば"
+    echo "  失われるので注意）"
+    rm -rf "$APP_DIR/venv"
+fi
 if [ ! -d "$APP_DIR/venv" ]; then
-    python3 -m venv "$APP_DIR/venv"
-    echo "  venvを新規作成しました"
+    python3 -m venv --system-site-packages "$APP_DIR/venv"
+    echo "  venvを新規作成しました（--system-site-packages 付き）"
 else
-    echo "  venvは既に存在するため作成をスキップしました"
+    echo "  venvは既に --system-site-packages 付きで存在するため作成をスキップしました"
 fi
 "$APP_DIR/venv/bin/pip" install --upgrade pip
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"

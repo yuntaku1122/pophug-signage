@@ -6,10 +6,30 @@
 # 個別にバージョン番号を書き込まない（変更漏れ・食い違いを防ぐため）。
 # ============================================
 
-__version__ = "4.35.0"
+__version__ = "4.35.1"
 
 # 変更履歴（新しいものが上）
 CHANGELOG = [
+    ("4.35.1", "【重要】pophug-install.shのvenv構築を--system-site-packages付きに"
+               "変更。新規Pi（Raspberry Pi Zero 2 W、カーネル6.18系）の実機検証で、"
+               "起動直後にpygame.error: kmsdrm not availableでpophug-signage.service"
+               "が起動失敗を繰り返す不具合が発生。実機での切り分けの結果、"
+               "システムのpygame（apt版、SDL 2.32.4同梱）は正常にkmsdrm初期化できる"
+               "一方、venv内にpipで別途インストールされたpygame（PyPI版、SDL 2.28.4"
+               "同梱）はkmsdrm初期化に失敗することが判明。従来のpophug-install.shは"
+               "venvを--system-site-packages無しで作成していたため、"
+               "requirements.txtのpygame（バージョン指定無し）がシステム版を無視して"
+               "PyPIから別途取得されてしまっていた。以前から稼働していた機体で"
+               "問題が起きなかったのは、そのvenvがこのスクリプトが存在する前の"
+               "別の方法（--system-site-packages付き）で作られていた偶然による"
+               "もので、新規セットアップでは必ず発生しうる不具合だった。"
+               "venv作成を--system-site-packages付きに変更し、既存の（無しで"
+               "作られた）venvも自動検知して作り直すようにした（pyvenv.cfgの"
+               "include-system-site-packagesを確認）。これによりpygame・gpiozeroは"
+               "システムのapt版（ハードウェア最適化済み）がそのまま使われ、"
+               "flask・qrcode等システムに無いものは従来通りpipでインストールされる。"
+               "新規作成・既存venvの作り直し・既に正しい既存venvのスキップ、"
+               "3パターンを実際にvenvを作成した上で確認した"),
     ("4.35.0", "pophug-install.shに、起動モードをCLI（コンソール、デスクトップ環境"
                "無し）へ自動的に切り替える処理を追加（8/8）。pophug-signageの画面"
                "描画はpygame+kmsdrmでデスクトップ環境を介さず直接画面を掴む方式のため"
