@@ -63,7 +63,22 @@ if [ -z "${STY:-}" ] && [ -z "${TMUX:-}" ] && [ -z "${POPHUG_INSTALL_NO_SCREEN:-
     echo "  screen -r pophug-install"
     echo ""
     export POPHUG_INSTALL_NO_SCREEN=1
-    exec screen -S pophug-install bash "$0" "$@"
+    # ここは意図的に exec ではなく通常の呼び出しにしている。exec だとscreen
+    # コマンド自体に処理を完全に明け渡してしまい、環境によってscreenが
+    # 何らかの理由で即座に終了してしまった場合（実機で実際に発生）、
+    # インストール処理が一切実行されないまま、エラーも出さず終わってしまう。
+    # 終了コードを見て、screen経由が失敗した場合はscreen無しで直接続行する
+    # （POPHUG_INSTALL_NO_SCREEN=1は既にexport済みなので、下にそのまま
+    # 処理が続けば二重にscreenへ入ろうとすることはない）。
+    if screen -S pophug-install bash "$0" "$@"; then
+        exit 0
+    else
+        echo ""
+        echo "⚠ screen経由での実行がうまくいかなかったため、screen無しで直接"
+        echo "  続行します（この環境ではSSH切断への耐性が効かない状態です。"
+        echo "  原因不明な場合は開発者に状況を報告してください）"
+        echo ""
+    fi
 fi
 
 EXPECTED_DIR="/home/pophug/pophug-signage"
