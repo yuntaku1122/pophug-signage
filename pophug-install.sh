@@ -120,7 +120,14 @@ fi
 echo ""
 echo "--- 1/8: OSパッケージのインストール ---"
 sudo apt-get update
-sudo apt-get install -y python3-venv python3-pip git exfatprogs
+# fonts-noto-cjk: 日本語フォント。main.pyのget_japanese_fontが
+# /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc を候補として
+# 探しにいくが、これが無いとpygameのデフォルトフォント（日本語グリフを
+# 含まない）にフォールバックし、画面の文字が全て豆腐（□）になる。
+# 以前から稼働している機体で問題が起きなかったのは、そのイメージに
+# たまたま日本語フォントが入っていた（Desktop版由来等）偶然によるもので、
+# 新規セットアップでは確実に入れておく必要がある（pygame/venvの件と同種の問題）。
+sudo apt-get install -y python3-venv python3-pip git exfatprogs fonts-noto-cjk
 
 echo ""
 echo "--- 2/8: Python仮想環境の構築 ---"

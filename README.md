@@ -667,6 +667,7 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
+| 4.35.3 | pophug-install.shにfonts-noto-cjk（日本語フォント）のインストールを追加。新規Pi実機で画面の日本語が全て豆腐（□）になる不具合を修正。以前の機体はたまたまフォントが入っていた偶然によるもので、新規セットアップでは保証されていなかった（v4.35.1のpygame/venvの件と同種） |
 | 4.35.2 | pophug-install.shのscreen自動起動に、screen自体が機能しない環境向けのフォールバックを追加。execで完全に処理を明け渡していたため、screenが即座に終了する環境ではインストール処理が無言で全く実行されない不具合があった。screen失敗時は自動的にscreen無しで直接続行するように修正 |
 | 4.35.1 | 【重要】pophug-install.shのvenv構築を--system-site-packages付きに変更。新規Pi実機で発生したpygame.error: kmsdrm not availableによる起動失敗を修正（venv内にpipで別途取得されるpygameが古いSDLを内蔵しており、新しいカーネルのDRM実装と相性問題があった）。システムのpygame（apt版）がそのまま使われるようになる。既存の（このフラグ無しで作られた）venvも自動検知して作り直す |
 | 4.35.0 | pophug-install.shに、起動モードをCLI（デスクトップ環境無し）へ自動的に切り替える処理を追加。Desktop版イメージで書き込んでしまった場合も自動でCLIモードに揃う。起動高速化・メモリ削減・kmsdrmとの画面競合回避が目的 |
