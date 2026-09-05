@@ -676,19 +676,33 @@ def try_export_images(mount_point, image_folder):
         log(f"書き出し先フォルダの作成に失敗しました: {e}")
         return f"書き出し先フォルダの作成に失敗しました（{e}）"
 
-    # コピー処理は画像の枚数によっては数秒〜数十秒かかることがあり、その間
-    # 画面に何の変化も無いと「固まったのでは」と誤解されかねない。1枚コピー
-    # するごとに進捗を専有画面（シャットダウン中等と同じフルスクリーン通知）で
-    # 更新する。main.py側はimages/.notice.jsonの更新時刻を1秒間隔でポーリング
-    # しているため、この途中経過もほぼリアルタイムに反映される（最終的な
-    # 完了メッセージは、この関数の戻り値をhandle_add側が改めて通知することで
-    # 上書きされる）。
+    # コピー処理は画像の枚数・サイズによっては数十秒以上かかることがあり、その間
+    # 画面に何の変化も無いと「固まったのでは」と誤解されかねない。進捗を専有画面
+    # （シャットダウン中等と同じフルスクリーン通知）で更新する。main.py側は
+    # images/.notice.jsonの更新時刻を1秒間隔でポーリングしているため、この
+    # 途中経過もほぼリアルタイムに反映される（最終的な完了メッセージは、
+    # この関数の戻り値をhandle_add側が改めて通知することで上書きされる）。
+    #
+    # 【v4.37.2の教訓】当初は1枚コピーするごとに毎回save_notice()（内部でfsync）
+    # していたが、ext4では小さな通知ファイルへのfsyncであっても、その時点で
+    # 未確定の他の書き込み（＝進行中の大量の画像コピー分）をまとめてディスクへ
+    # 書き切らせてしまう。88枚・172MBの実機検証で、この頻発するfsyncがPi Zero 2W
+    # の非力なI/Oを詰まらせ、本体側メインループの生存通知が間に合わずに
+    # systemdウォッチドッグでSIGKILL→本体再起動、という重大な不具合を引き起こした。
+    # 対策として、進捗通知はdurable=False（fsyncを省略）で書き込み、かつ更新間隔も
+    # 0.5秒に間引く（枚数が多くても書き込み回数は増えない）。durable=Falseでも
+    # os.replace()自体の原子性（画面表示が中途半端に壊れた内容になることが無い）
+    # は保たれる。開始（0枚）・完了（全枚）の通知だけは間引かず必ず出す。
     total = len(images)
     signage_state.save_notice(
-        image_folder, f"USBへ画像を書き出しています…（0/{total}枚）", sticky=True, fullscreen=True)
+        image_folder, f"USBへ画像を書き出しています…（0/{total}枚）",
+        sticky=True, fullscreen=True, durable=False)
 
     copied = 0
     failed = []
+    last_notice_time = time.time()
+    PROGRESS_NOTICE_MIN_INTERVAL = 0.5  # 秒。この間隔より短い間の更新はまとめて間引く
+
     for idx, name in enumerate(images, start=1):
         src = os.path.join(image_folder, name)
         dst = os.path.join(dest_dir, name)
@@ -698,8 +712,14 @@ def try_export_images(mount_point, image_folder):
         except OSError as e:
             log(f"画像の書き出しに失敗しました（{name}）: {e}")
             failed.append(name)
-        signage_state.save_notice(
-            image_folder, f"USBへ画像を書き出しています…（{idx}/{total}枚）", sticky=True, fullscreen=True)
+
+        now = time.time()
+        is_last = (idx == total)
+        if is_last or now - last_notice_time >= PROGRESS_NOTICE_MIN_INTERVAL:
+            last_notice_time = now
+            signage_state.save_notice(
+                image_folder, f"USBへ画像を書き出しています…（{idx}/{total}枚）",
+                sticky=True, fullscreen=True, durable=False)
 
     try:
         dir_fd = os.open(dest_dir, os.O_RDONLY)

@@ -17,17 +17,25 @@ import time
 _lock = threading.Lock()
 
 
-def _atomic_write_json(path, data):
+def _atomic_write_json(path, data, fsync=True):
     """一時ファイルに書き込んでからos.replace()で置き換える。
     書き込み中に電源が落ちても、元のファイルか新しいファイルかのどちらかが
-    必ず残る（中途半端に壊れた状態にはならない）。"""
+    必ず残る（中途半端に壊れた状態にはならない）。
+
+    fsync=True（既定）は実際にディスクへ書き切ってから置き換える、設定値等の
+    重要な状態向けの動作。fsync=Falseは、進捗表示のような「失っても実害の
+    無い・かつ短時間に何度も書き込む」用途向けの軽量版で、os.replace()自体の
+    原子性は保ったまま、実ディスクへの同期だけを省略する（ext4等では単発の
+    fsyncでもその時点の他の未確定書き込みをまとめて同期してしまうことがあり、
+    短時間に連発すると他のプロセスのI/Oを巻き込んで詰まらせる恐れがあるため）。"""
     folder = os.path.dirname(path) or "."
     fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", dir=folder)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
             f.flush()
-            os.fsync(f.fileno())  # OSのバッファに留まらず実際にディスクへ書き切らせる
+            if fsync:
+                os.fsync(f.fileno())  # OSのバッファに留まらず実際にディスクへ書き切らせる
         os.replace(tmp_path, path)  # 同一ファイルシステム内でのrenameはPOSIX上atomic
     except Exception:
         if os.path.exists(tmp_path):
@@ -405,7 +413,7 @@ def _notice_path(image_folder):
     return os.path.join(image_folder, ".notice.json")
 
 
-def save_notice(image_folder, message, sticky=False, fullscreen=False):
+def save_notice(image_folder, message, sticky=False, fullscreen=False, durable=True):
     """サイネージ画面に一時表示するメッセージを保存する。
     sticky=Trueの場合、main.py側は「取り外すまで表示」系の通知として扱う
     （USBメモリー取り込み完了時など）。実際に消すのはclear_notice()を呼んだ時、
@@ -413,13 +421,22 @@ def save_notice(image_folder, message, sticky=False, fullscreen=False):
     fullscreen=Trueの場合、main.py側は小さなバナーではなく黒背景に大きな文字の
     専有画面として表示する（USBメモリーに読み込める内容が何も無かった場合など、
     見落とされては困る通知向け）。この場合は時間上限も設けられず、
-    clear_notice()が呼ばれるまで（＝USBメモリーが抜かれるまで）表示し続ける。"""
+    clear_notice()が呼ばれるまで（＝USBメモリーが抜かれるまで）表示し続ける。
+
+    durable=False（既定はTrue）を指定すると、実ディスクへのfsyncを省略する。
+    USB書き出し中の「N/M枚」のような進捗表示は、短時間に何度も呼ばれる上、
+    電源断で最後の1回分を失っても実害が無いため、この軽量版を使うことで
+    ext4のfsyncが他の未確定I/O（大量の画像コピー等）を巻き込んで
+    システム全体のディスクI/Oを詰まらせる事態を避けられる
+    （v4.37.2で、この詰まりが原因のウォッチドッグ強制終了・本体再起動を
+    修正した際に追加）。設定変更や取り込み完了などの重要な通知は、
+    従来通りdurable=True（既定）のまま実ディスクへ書き切る。"""
     path = _notice_path(image_folder)
     with _lock:
         _atomic_write_json(path, {
             "message": message, "ts": time.time(),
             "sticky": bool(sticky), "fullscreen": bool(fullscreen),
-        })
+        }, fsync=durable)
 
 
 def clear_notice(image_folder):
