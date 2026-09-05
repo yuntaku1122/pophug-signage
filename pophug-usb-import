@@ -125,9 +125,11 @@ try:
     import config as _config
     EXPORT_KEY_FILENAME = getattr(_config, "EXPORT_KEY_FILENAME", "pophug-export-key.txt")
     EXPORT_FOLDER_PREFIX = getattr(_config, "EXPORT_FOLDER_PREFIX", "pophug_export_")
+    EXPORT_HOLD_SECONDS = getattr(_config, "EXPORT_HOLD_SECONDS", 15)
 except ImportError:
     EXPORT_KEY_FILENAME = "pophug-export-key.txt"
     EXPORT_FOLDER_PREFIX = "pophug_export_"
+    EXPORT_HOLD_SECONDS = 15
 
 
 STATE_FILENAMES = (
@@ -674,9 +676,20 @@ def try_export_images(mount_point, image_folder):
         log(f"書き出し先フォルダの作成に失敗しました: {e}")
         return f"書き出し先フォルダの作成に失敗しました（{e}）"
 
+    # コピー処理は画像の枚数によっては数秒〜数十秒かかることがあり、その間
+    # 画面に何の変化も無いと「固まったのでは」と誤解されかねない。1枚コピー
+    # するごとに進捗を専有画面（シャットダウン中等と同じフルスクリーン通知）で
+    # 更新する。main.py側はimages/.notice.jsonの更新時刻を1秒間隔でポーリング
+    # しているため、この途中経過もほぼリアルタイムに反映される（最終的な
+    # 完了メッセージは、この関数の戻り値をhandle_add側が改めて通知することで
+    # 上書きされる）。
+    total = len(images)
+    signage_state.save_notice(
+        image_folder, f"USBへ画像を書き出しています…（0/{total}枚）", sticky=True, fullscreen=True)
+
     copied = 0
     failed = []
-    for name in images:
+    for idx, name in enumerate(images, start=1):
         src = os.path.join(image_folder, name)
         dst = os.path.join(dest_dir, name)
         try:
@@ -685,6 +698,8 @@ def try_export_images(mount_point, image_folder):
         except OSError as e:
             log(f"画像の書き出しに失敗しました（{name}）: {e}")
             failed.append(name)
+        signage_state.save_notice(
+            image_folder, f"USBへ画像を書き出しています…（{idx}/{total}枚）", sticky=True, fullscreen=True)
 
     try:
         dir_fd = os.open(dest_dir, os.O_RDONLY)
@@ -781,8 +796,32 @@ def handle_add(device_name):
         update_message = find_and_stage_update_package(MOUNT_POINT, IMAGE_FOLDER)
         settings_message = find_and_apply_settings_file(MOUNT_POINT, IMAGE_FOLDER)
         export_message = try_export_images(MOUNT_POINT, IMAGE_FOLDER) if want_export else None
+
+        # USB書き出し機能の合言葉ファイル自体は、待受け中でなくても・合言葉が
+        # 不一致でも、USBの直下に置かれていること自体は分かる。書き出しが
+        # 実際には行われなかった場合に、その理由をその場の画面だけで判断できる
+        # よう、この検出結果を後段のメッセージ組み立てで使う（合言葉ファイルが
+        # 無い普通の写真用USBでは何も表示が変わらないので、既存の運用に影響しない）。
+        try:
+            key_file_present = any(
+                n.lower() == EXPORT_KEY_FILENAME.lower() for n in os.listdir(MOUNT_POINT))
+        except OSError:
+            key_file_present = False
     finally:
         unmount()
+
+    export_hint_message = None
+    if key_file_present and not export_message:
+        if want_export:
+            export_hint_message = (
+                "合言葉ファイルを検出しましたが、内容が発行済みのものと一致しないため、"
+                "書き出しは行われませんでした。設定画面で合言葉ファイルを発行し直して"
+                "USBメモリーに置き直してください")
+        else:
+            export_hint_message = (
+                "合言葉ファイルを検出しましたが、USB書き出し待受け中ではないため、"
+                f"書き出しは行われませんでした。本体ボタンを{EXPORT_HOLD_SECONDS}秒以上"
+                "長押ししてから、あらためてこのUSBメモリーを挿してください")
 
     # 写真が1枚も無い（＝スライドショー自体には見た目の変化が起きない）USBの場合、
     # 「完全に空」「アップデートパッケージのみ」「設定ファイルのみ」「それらの
@@ -798,6 +837,8 @@ def handle_add(device_name):
         parts = [build_notice_message(result)]
         if export_message:
             parts.append(export_message)
+        elif export_hint_message:
+            parts.append(export_hint_message)
         if update_message:
             parts.append(update_message)
         if settings_message:
@@ -808,6 +849,8 @@ def handle_add(device_name):
         parts = []
         if export_message:
             parts.append(export_message)
+        elif export_hint_message:
+            parts.append(export_hint_message)
         if update_message:
             parts.append(update_message)
         if settings_message:
@@ -815,11 +858,11 @@ def handle_add(device_name):
         if parts:
             message = "　".join(parts)
         else:
-            # 画像・アップデートパッケージ・設定ファイルのいずれも見つからなかった
-            # （USBが空・非対応形式のみ・トップレベルではなくサブフォルダの中に
-            # 置いてしまっている、等）。result["error"]には状況に応じた具体的な
-            # 理由（読み込み失敗の詳細等）が入っていることもあるため、それが
-            # あれば優先して使う。
+            # 画像・アップデートパッケージ・設定ファイル・書き出し合言葉のいずれも
+            # 見つからなかった（USBが空・非対応形式のみ・トップレベルではなく
+            # サブフォルダの中に置いてしまっている、等）。result["error"]には
+            # 状況に応じた具体的な理由（読み込み失敗の詳細等）が入っていることも
+            # あるため、それがあれば優先して使う。
             message = result["error"] or (
                 "USBメモリーの直下に画像ファイルがありません。"
                 "画像・アップデートパッケージ・設定ファイルは、"
