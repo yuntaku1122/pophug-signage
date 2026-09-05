@@ -19,7 +19,9 @@ from signage_state import (load_hidden, hidden_mtime, load_settings, settings_mt
                             load_priority, PRIORITY_TAGS, load_notice, notice_mtime,
                             load_pinned, save_hidden, network_recheck_mtime,
                             load_usb_update_pending, usb_update_pending_mtime,
-                            clear_usb_update_pending)
+                            clear_usb_update_pending, load_export_key_info,
+                            save_export_standby, load_export_standby,
+                            clear_export_standby, export_standby_mtime)
 from version import __version__
 import wifi_setup
 import sd_watchdog
@@ -192,6 +194,18 @@ class PopSignage:
         self._usb_update_applying = False  # 適用処理の多重起動防止
 
         self._shutting_down = False  # ボタン長押しでシャットダウンが確定した後、真になる
+
+        # USB書き出し（吸い出し）機能：ボタン長押しでの待受けモード。
+        # 起動時点で待受けファイルが残っていても（前回起動中に開始して
+        # 確定しないまま再起動された等）、今回の起動では引き継がず一旦解除する。
+        # main.py（このプロセス）のself.export_standby_activeが唯一の
+        # 信頼できる「今まさに待受け中か」の情報源であるべきで、プロセス再起動を
+        # またいで古いファイルの期限内であるというだけの理由で
+        # pophug-usb-importが誤って書き出しを行ってしまうのを防ぐため。
+        clear_export_standby(IMAGE_FOLDER)
+        self.export_standby_active = False
+        self.export_standby_start_time = 0
+        self.last_export_standby_mtime = export_standby_mtime(IMAGE_FOLDER)
 
         self.load_pop_images(initial=True)
 
@@ -427,17 +441,19 @@ class PopSignage:
     # ---------------- QRコード表示ボタン ----------------
 
     def setup_qr_button(self):
-        """ボタン1つで5段階の操作を行う。
+        """ボタン1つで6段階の操作を行う。
         短押し             : QRコード表示/非表示トグル
         MANUAL_HOLD_SECONDS秒以上長押し        : 取扱説明を表示
         WIFI_SETUP_HOLD_SECONDS秒以上長押し    : Wi-Fiセットアップモード
         RESET_DISPLAY_HOLD_SECONDS秒以上長押し : 表示リセット（固定表示のみ表示）
         SHUTDOWN_HOLD_SECONDS秒以上長押し      : シャットダウン
+        EXPORT_HOLD_SECONDS秒以上長押し        : USB書き出し待受けモード
         判定は「離した瞬間の合計長押し時間」で行う（押している間は毎フレーム
         run()から_poll_button()が呼ばれ、進捗を画面に表示する）。
         ラズパイ実機ではGPIOボタン、Mac等GPIOが無い環境では
         Qキー(QR表示)・Mキー(取扱説明)・Wキー(Wi-Fiセットアップモード)・
-        Rキー(表示リセット)・Sキー(シャットダウン)で代用する。"""
+        Rキー(表示リセット)・Sキー(シャットダウン)・Eキー(USB書き出し待受け)
+        で代用する。"""
         self._qr_button = None
         self._button_press_start = None
         try:
@@ -447,12 +463,13 @@ class PopSignage:
                 f"短押し=QR表示 / {MANUAL_HOLD_SECONDS}秒長押し=取扱説明 / "
                 f"{WIFI_SETUP_HOLD_SECONDS}秒長押し=Wi-Fiセットアップ / "
                 f"{RESET_DISPLAY_HOLD_SECONDS}秒長押し=表示リセット / "
-                f"{SHUTDOWN_HOLD_SECONDS}秒長押し=シャットダウン")
+                f"{SHUTDOWN_HOLD_SECONDS}秒長押し=シャットダウン / "
+                f"{EXPORT_HOLD_SECONDS}秒長押し=USB書き出し待受け")
         except Exception as e:
             log(f"GPIOボタンが利用できません（{e}）。"
                 f"代わりにキーボードの[Q]キーでQR表示、[M]キーで取扱説明、"
                 f"[W]キーでWi-Fiセットアップ、[R]キーで表示リセット、"
-                f"[S]キーでシャットダウンを確認できます")
+                f"[S]キーでシャットダウン、[E]キーでUSB書き出し待受けを確認できます")
 
     def _poll_button(self):
         """毎フレーム呼ばれ、物理ボタンの押下時間を監視する。gpiozeroのコールバックではなく
@@ -475,6 +492,13 @@ class PopSignage:
         if self._shutting_down:
             # シャットダウンが確定した後は、実際に電源が落ちるまでの短い間に
             # ボタンが再度押されても一切反応しない（誤操作防止）
+            return
+
+        if self.export_standby_active:
+            # USB書き出し待受け中は、押した時間に関わらずキャンセル操作として扱う
+            # （待受けに入るための長押しラダーとは独立させ、誤って別の操作と
+            # 混同しないようにするため。他の能動的モードと同じ扱い）
+            self._cancel_export_standby(reason="ボタン操作によりキャンセル")
             return
 
         if self.wifi_setup_active:
@@ -501,7 +525,9 @@ class PopSignage:
             self._handle_usb_update_button(held_seconds)
             return
 
-        if held_seconds >= SHUTDOWN_HOLD_SECONDS:
+        if held_seconds >= EXPORT_HOLD_SECONDS:
+            self._enter_export_standby()
+        elif held_seconds >= SHUTDOWN_HOLD_SECONDS:
             self._trigger_button_shutdown()
         elif held_seconds >= RESET_DISPLAY_HOLD_SECONDS:
             self._reset_display_to_pinned_only()
@@ -639,6 +665,65 @@ class PopSignage:
         self.canvas.blit(sub, (self.canvas.get_width() // 2 - sub.get_width() // 2,
                                 base_y + surf.get_height() + 16))
 
+    def _enter_export_standby(self):
+        """ボタンの最長長押しで、USB書き出し待受けモードに入る。
+        書き出し用の合言葉キーがまだ発行されていない場合は、待受けに入らず
+        エラー通知だけを出す（先にWeb設定画面で発行してもらう必要があるため）。
+        待受け中は images/.export_standby.json に期限付きで記録し、root権限で
+        動くpophug-usb-import（別プロセス）が、USBメモリー挿入時にこれを見て
+        書き出しを試みるかどうかを判断する。"""
+        if self.export_standby_active:
+            return
+
+        key_info = load_export_key_info(IMAGE_FOLDER)
+        if not key_info:
+            log("USB書き出し待受けが要求されましたが、書き出し用キーが未発行のため中止しました")
+            self._show_notice("USB書き出し用のキーが未発行です。設定画面（スマホ）から発行してください")
+            return
+
+        expires_at = time.time() + EXPORT_STANDBY_TIMEOUT_SECONDS
+        save_export_standby(IMAGE_FOLDER, expires_at)
+        self.last_export_standby_mtime = export_standby_mtime(IMAGE_FOLDER)
+        self.export_standby_active = True
+        self.export_standby_start_time = time.time()
+        self._hide_qr()
+        self.manual_active = False
+        log(f"USB書き出し待受けモードに入りました"
+            f"（{EXPORT_STANDBY_TIMEOUT_SECONDS}秒以内に合言葉入りのUSBメモリーを挿してください）")
+
+    def _cancel_export_standby(self, reason):
+        """USB書き出し待受けモードを終了する（ボタン操作・タイムアウト・
+        別プロセスでの書き出し完了検知のいずれからも呼ばれる）。"""
+        if not self.export_standby_active:
+            return
+        clear_export_standby(IMAGE_FOLDER)
+        self.export_standby_active = False
+        log(f"USB書き出し待受けモードを終了しました: {reason}")
+        self._show_notice("USB書き出し待受けを終了しました")
+
+    def draw_export_standby_screen(self):
+        """USB書き出し待受け中に毎フレーム描画する専有画面。
+        draw_shutdown_screen等と同じ考え方で、待受け中は他の画面（スライドショー等）
+        に上書きされず、合言葉入りのUSBメモリーを挿すよう案内し続ける。"""
+        self.canvas.fill((10, 10, 10))
+        remaining = max(0.0, EXPORT_STANDBY_TIMEOUT_SECONDS - (time.time() - self.export_standby_start_time))
+        surf = self._render_fit_text(
+            "USB書き出し待受け中", self.canvas.get_width() - 48,
+            start_size=30, min_size=16, color=(150, 220, 255))
+        sub = self._render_fit_text(
+            "合言葉入りのUSBメモリーを挿してください", self.canvas.get_width() - 48,
+            start_size=18, min_size=12, color=(220, 220, 220))
+        sub2 = self._render_fit_text(
+            f"あと{remaining:.0f}秒でキャンセル（ボタンを押すと今すぐキャンセル）",
+            self.canvas.get_width() - 48, start_size=14, min_size=10, color=(180, 180, 180))
+        total_h = surf.get_height() + 12 + sub.get_height() + 12 + sub2.get_height()
+        base_y = self.canvas.get_height() // 2 - total_h // 2
+        self.canvas.blit(surf, (self.canvas.get_width() // 2 - surf.get_width() // 2, base_y))
+        self.canvas.blit(sub, (self.canvas.get_width() // 2 - sub.get_width() // 2,
+                                base_y + surf.get_height() + 12))
+        self.canvas.blit(sub2, (self.canvas.get_width() // 2 - sub2.get_width() // 2,
+                                 base_y + surf.get_height() + 12 + sub.get_height() + 12))
+
     def draw_button_hold_overlay(self):
         """ボタンを押している最中、あとどれだけ押せば何が起きるかを画面に表示する"""
         if self._button_press_start is None:
@@ -675,8 +760,12 @@ class PopSignage:
                 remaining = USB_UPDATE_CONFIRM_HOLD_SECONDS - held
                 text = f"長押し中...あと{remaining:.1f}秒でアップデート適用（v{version}）（今離すと見送り）"
                 color = (255, 210, 120)
+        elif held >= EXPORT_HOLD_SECONDS:
+            text = "離すとUSB書き出し待受けモードに入ります"
+            color = (150, 220, 255)
         elif held >= SHUTDOWN_HOLD_SECONDS:
-            text = "離すとシャットダウンします"
+            remaining = EXPORT_HOLD_SECONDS - held
+            text = f"離すとシャットダウンします（あと{remaining:.0f}秒でUSB書き出し待受け）"
             color = (255, 90, 90)
         elif held >= RESET_DISPLAY_HOLD_SECONDS:
             remaining = SHUTDOWN_HOLD_SECONDS - held
@@ -1458,6 +1547,12 @@ class PopSignage:
                         if event.key == pygame.K_s:
                             # Mac等、GPIOボタンが無い環境でのシャットダウン確認用
                             self._trigger_button_shutdown()
+                        if event.key == pygame.K_e:
+                            # Mac等、GPIOボタンが無い環境でのUSB書き出し待受け確認用
+                            if self.export_standby_active:
+                                self._cancel_export_standby(reason="キー操作によりキャンセル")
+                            else:
+                                self._enter_export_standby()
 
                 self._poll_button()
 
@@ -1526,6 +1621,17 @@ class PopSignage:
                                 f"本体ボタンを{USB_UPDATE_CONFIRM_HOLD_SECONDS}秒以上"
                                 f"長押しすると適用します")
 
+                    # USB書き出し（吸い出し）機能：待受け中に、別プロセス
+                    # (pophug-usb-import)が書き出しを完了・見送りして状態ファイルを
+                    # 消した場合の検知。ここで検知した時点で既に通知(sticky notice)は
+                    # 別途表示されているはずなので、ここではUIの専有画面だけを解除する。
+                    current_export_standby_mtime = export_standby_mtime(IMAGE_FOLDER)
+                    if current_export_standby_mtime != self.last_export_standby_mtime:
+                        self.last_export_standby_mtime = current_export_standby_mtime
+                        if self.export_standby_active and load_export_standby(IMAGE_FOLDER) is None:
+                            self.export_standby_active = False
+                            log("USB書き出し待受け状態の変化を検知し、待受け画面を終了しました")
+
                 if now - self.last_scan_time >= RESCAN_INTERVAL:
                     self.last_scan_time = now
                     self.load_pop_images()
@@ -1548,6 +1654,10 @@ class PopSignage:
                         elif self.wifi_setup_active and now - self.wifi_setup_start_time >= WIFI_SETUP_TIMEOUT_SECONDS:
                             log("接続情報の表示がタイムアウトしました")
                             self.exit_wifi_setup_mode()
+
+                if (self.export_standby_active
+                        and now - self.export_standby_start_time >= EXPORT_STANDBY_TIMEOUT_SECONDS):
+                    self._cancel_export_standby(reason="タイムアウト")
 
                 # 知っているWi-Fiが見つからない場合、自動的にスタンドアロンモードへ移行する。
                 # 起動直後は少し待ってから最初の判定を行い、以後は定期的に再判定する
@@ -1574,6 +1684,8 @@ class PopSignage:
                 elif self.manual_active:
                     self.draw_manual_screen()
                     self.draw_button_hold_overlay()
+                elif self.export_standby_active:
+                    self.draw_export_standby_screen()
                 elif self._fullscreen_notice_active:
                     # USBメモリーに読み込める内容が何も無かった場合の専有画面。
                     # ボタン操作（QR表示等）よりは優先度を落とし、Wi-Fiセットアップ・

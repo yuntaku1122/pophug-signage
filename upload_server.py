@@ -21,6 +21,7 @@
 
 import os
 import re
+import secrets
 import socket
 import subprocess
 import threading
@@ -104,10 +105,20 @@ try:
 except ImportError:
     DEFAULT_GITHUB_REPO = "yuntaku1122/pophug-signage"
 
+try:
+    from config import EXPORT_KEY_FILENAME
+except ImportError:
+    EXPORT_KEY_FILENAME = "pophug-export-key.txt"
+
+try:
+    from config import EXPORT_HOLD_SECONDS
+except ImportError:
+    EXPORT_HOLD_SECONDS = 15
+
 import update_check
 
 try:
-    from flask import Flask, request, redirect, send_from_directory
+    from flask import Flask, request, redirect, send_from_directory, Response
 except ImportError:
     Flask = None
 
@@ -642,6 +653,50 @@ UPLOAD_PAGE = """
        color:#fff; border-radius:8px; text-decoration:none; font-size:15px;">Wi-Fi設定を開く</a>
   </div>
 
+  <div class="box" style="margin-top:16px;">
+    <h1>USB書き出し機能</h1>
+    <p class="hint" style="margin:0 0 12px;">
+      本体ボタンを__EXPORT_HOLD_SECONDS__秒以上長押しすると「書き出し待受けモード」に入ります。
+      待受け中に、ここで発行した合言葉ファイルが入ったUSBメモリーを挿すと、
+      現在格納されている画像を全てそのUSBへ書き出せます（PCレスで実行可能）。
+    </p>
+    <p class="hint" id="export-key-status" style="margin:0 0 12px;">現在の状態: __EXPORT_KEY_STATUS__</p>
+    <form id="export-key-generate-form" method="POST" action="/export-key/generate" style="display:inline;"></form>
+    <button type="button" id="export-key-generate-btn">新しい合言葉ファイルを発行してダウンロード</button>
+    __EXPORT_KEY_REVOKE_BUTTON__
+    <p class="setting-status" id="export-key-status-msg"></p>
+  </div>
+
+  <script>
+  (function () {
+    var generateBtn = document.getElementById('export-key-generate-btn');
+    generateBtn.addEventListener('click', function () {
+      var confirmed = window.confirm(
+        '新しく発行すると、以前発行した合言葉ファイルは使えなくなります。\\n' +
+        'よろしいですか？'
+      );
+      if (!confirmed) {
+        return;
+      }
+      document.getElementById('export-key-generate-form').submit();
+    });
+
+    var revokeBtn = document.getElementById('export-key-revoke-btn');
+    if (revokeBtn) {
+      revokeBtn.addEventListener('click', function () {
+        var confirmed = window.confirm(
+          '書き出し用キーを無効化しますか？\\n' +
+          '以後、発行済みのUSBメモリーでは書き出しできなくなります。'
+        );
+        if (!confirmed) {
+          return;
+        }
+        document.getElementById('export-key-revoke-form').submit();
+      });
+    }
+  })();
+  </script>
+
   <div class="box danger-box" style="margin-top:16px;">
     <h1>システム</h1>
     <button type="button" id="shutdown-btn">ラズパイをシャットダウン</button>
@@ -1127,6 +1182,22 @@ def create_app(image_folder):
         }
         network_mode_label = network_mode_labels.get(wifi_setup.current_network_mode(), "不明")
 
+        export_key_info = signage_state.load_export_key_info(image_folder)
+        if export_key_info:
+            created_at = export_key_info.get("created_at")
+            created_label = (datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+                              if created_at else "不明な日時")
+            export_key_status = f"発行済み（{created_label}発行）"
+            export_key_revoke_button = (
+                '<form id="export-key-revoke-form" method="POST" '
+                'action="/export-key/revoke" style="display:inline;"></form>'
+                '<button type="button" id="export-key-revoke-btn" '
+                'style="margin-top:8px; background:#777;">キーを無効化する</button>'
+            )
+        else:
+            export_key_status = "未発行"
+            export_key_revoke_button = ""
+
         html = (UPLOAD_PAGE
                 .replace("__MESSAGE__", message)
                 .replace("__COUNT__", str(len(files)))
@@ -1142,6 +1213,9 @@ def create_app(image_folder):
                 .replace("__HOSTNAME__", socket.gethostname())
                 .replace("__UPDATE_HISTORY_HTML__", render_update_history(update_check.read_history()))
                 .replace("__NETWORK_MODE_LABEL__", network_mode_label)
+                .replace("__EXPORT_HOLD_SECONDS__", str(EXPORT_HOLD_SECONDS))
+                .replace("__EXPORT_KEY_STATUS__", _h(export_key_status))
+                .replace("__EXPORT_KEY_REVOKE_BUTTON__", export_key_revoke_button)
                 .replace("__GALLERY__", gallery_html)
                 .replace("__VERSION__", __version__))
         return html
@@ -1464,6 +1538,27 @@ def create_app(image_folder):
         error_message = err or out or "不明なエラー"
         print(f"[wifi] 保存済みWi-Fi情報の削除に失敗: {error_message}")
         return {"status": "error", "error": error_message}, 500
+
+    @app.route("/export-key/generate", methods=["POST"])
+    def export_key_generate():
+        # USB書き出し機能の合言葉を新規発行する。生の値はこの応答（ダウンロード
+        # されるテキストファイル）にしか含まれず、本体側にはSHA256ハッシュだけを
+        # 保存する（signage_state.save_export_key）。以前発行した合言葉は
+        # この時点で上書きされ、以後使えなくなる。
+        raw_key = secrets.token_hex(16)
+        signage_state.save_export_key(image_folder, raw_key)
+        print("[export-key] 新しい書き出し用キーを発行しました")
+
+        body = raw_key + "\n"
+        resp = Response(body, mimetype="text/plain; charset=utf-8")
+        resp.headers["Content-Disposition"] = f"attachment; filename={EXPORT_KEY_FILENAME}"
+        return resp
+
+    @app.route("/export-key/revoke", methods=["POST"])
+    def export_key_revoke():
+        signage_state.clear_export_key(image_folder)
+        print("[export-key] 書き出し用キーを無効化しました")
+        return redirect("/")
 
     @app.route("/shutdown", methods=["POST"])
     def shutdown():

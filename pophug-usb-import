@@ -118,6 +118,17 @@ try:
 except ImportError:
     update_check = None  # 未配置の場合はUSBアップデート検出機能だけ無効化する
 
+# config.py（標準ライブラリのみに依存）から、USB書き出し機能の合言葉
+# ファイル名・書き出し先フォルダの接頭辞を再利用する。未配置の環境でも
+# 動作を止めないよう、既定値にフォールバックする。
+try:
+    import config as _config
+    EXPORT_KEY_FILENAME = getattr(_config, "EXPORT_KEY_FILENAME", "pophug-export-key.txt")
+    EXPORT_FOLDER_PREFIX = getattr(_config, "EXPORT_FOLDER_PREFIX", "pophug_export_")
+except ImportError:
+    EXPORT_KEY_FILENAME = "pophug-export-key.txt"
+    EXPORT_FOLDER_PREFIX = "pophug_export_"
+
 
 STATE_FILENAMES = (
     ".hidden.json", ".pinned.json", ".priority.json",
@@ -186,8 +197,13 @@ def detect_fs_type(device_path):
     return r.stdout.strip()
 
 
-def mount_readonly(device_path):
-    """指定デバイスを読み取り専用でマウントする。USB側の内容は一切変更しない。
+def mount_device(device_path, read_write=False):
+    """指定デバイスをマウントする。read_write=False（既定）の場合は読み取り専用で、
+    USB側の内容は一切変更しない（通常の画像取り込み・アップデート検出・設定
+    ファイル読み込み時はこちら）。read_write=Trueは、ボタン長押しで明示的に
+    アーム済みのUSB書き出し待受け中だけに使う（合言葉ファイルの有無・一致は
+    別途try_export_images側でチェックする。ここではマウントオプションを
+    分けるだけで、書き込み内容自体はまだ決まっていない）。
     戻り値: (成功したか, エラーメッセージ or None)"""
     fs_type = detect_fs_type(device_path)
     mount_type = {"vfat": "vfat", "exfat": "exfat"}.get(fs_type)
@@ -195,7 +211,8 @@ def mount_readonly(device_path):
         return False, f"未対応のファイルシステムです（{fs_type or '不明'}）。FAT32/exFATのみ対応しています"
 
     os.makedirs(MOUNT_POINT, exist_ok=True)
-    r = run(["mount", "-t", mount_type, "-o", "ro", device_path, MOUNT_POINT], timeout=15)
+    mount_opt = "rw" if read_write else "ro"
+    r = run(["mount", "-t", mount_type, "-o", mount_opt, device_path, MOUNT_POINT], timeout=15)
     if r.returncode != 0:
         return False, (r.stderr or r.stdout or "マウントに失敗しました").strip()
     return True, None
@@ -595,6 +612,102 @@ def find_and_apply_settings_file(source_dir, image_folder):
     return msg
 
 
+# ---------------- USB書き出し（吸い出し）機能 ----------------
+# 本体ボタンの長押しで「待受け」状態（images/.export_standby.json）に入った
+# 直後にUSBメモリーが挿された場合だけ、以下の処理を試みる。待受け状態は
+# handle_add()側でマウント前に確認済み（=このマウントは既に読み書き可能）。
+# 挿したUSBの直下に、Web設定画面で発行した合言葉と一致するファイルが
+# 無ければ何もしない（通常のUSB取り込み・アップデート検出・設定ファイル
+# 適用だけはこの関数の呼び出しと無関係に、いつも通り実行される）。
+
+def try_export_images(mount_point, image_folder):
+    """待受け中のUSB書き出しを試みる。挿したUSBの直下にEXPORT_KEY_FILENAMEと
+    同名のファイルがあり、内容が発行済みの合言葉と一致した場合だけ、
+    現在image_folderに格納されている画像ファイルを全て、USBメモリー上に
+    日時付きで新しく作るフォルダへコピーする（USB側の既存ファイルには
+    一切触れない。毎回新しいフォルダを作るため上書きの心配が無い）。
+
+    書き出しが実際に行われた場合は待受け状態を消費（クリア）し、以後
+    もう一度ボタンを長押ししない限り書き出しはできないようにする。
+    合言葉が無い・不一致の場合は待受け状態をそのまま残す
+    （USBを挿し直して再挑戦できるように）。
+
+    戻り値: 画面通知用のメッセージ、または合言葉が無い/不一致で
+    書き出しを行わなかった場合はNone。"""
+    try:
+        entries = os.listdir(mount_point)
+    except OSError:
+        return None
+
+    matches = [n for n in entries if n.lower() == EXPORT_KEY_FILENAME.lower()]
+    if not matches:
+        log("USB書き出し待受け中ですが、合言葉ファイルが見つからないため書き出しをスキップしました")
+        return None
+
+    key_path = os.path.join(mount_point, matches[0])
+    try:
+        with open(key_path, "r", encoding="utf-8", errors="replace") as f:
+            raw_key = f.read().strip()
+    except OSError as e:
+        log(f"合言葉ファイルの読み込みに失敗しました: {e}")
+        return None
+
+    if not raw_key or not signage_state.verify_export_key(image_folder, raw_key):
+        log("USB書き出し待受け中ですが、合言葉が一致しないため書き出しをスキップしました")
+        return None
+
+    images = sorted(
+        f for f in os.listdir(image_folder)
+        if os.path.splitext(f)[1].lower() in SUPPORTED_EXT
+    )
+    if not images:
+        log("書き出し対象の画像が1枚も無いため、書き出しを見送りました")
+        signage_state.clear_export_standby(image_folder)
+        return "書き出し対象の画像が1枚もありませんでした"
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    dest_dir_name = f"{EXPORT_FOLDER_PREFIX}{ts}"
+    dest_dir = os.path.join(mount_point, dest_dir_name)
+    try:
+        os.makedirs(dest_dir, exist_ok=False)
+    except OSError as e:
+        log(f"書き出し先フォルダの作成に失敗しました: {e}")
+        return f"書き出し先フォルダの作成に失敗しました（{e}）"
+
+    copied = 0
+    failed = []
+    for name in images:
+        src = os.path.join(image_folder, name)
+        dst = os.path.join(dest_dir, name)
+        try:
+            shutil.copy2(src, dst)
+            copied += 1
+        except OSError as e:
+            log(f"画像の書き出しに失敗しました（{name}）: {e}")
+            failed.append(name)
+
+    try:
+        dir_fd = os.open(dest_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass  # exFAT等、ディレクトリのfsyncに対応していない環境もあるため失敗しても続行する
+
+    # 成功・一部失敗いずれの場合も、この回の待受けは消費する
+    # （合言葉自体は正しかったため、失敗を理由に何度も自動で試させることはしない。
+    # 再度書き出したい場合は改めてボタンを長押ししてもらう）。
+    signage_state.clear_export_standby(image_folder)
+
+    if failed:
+        log(f"USBへの書き出しが一部失敗しました（成功{copied}枚/失敗{len(failed)}枚）: {dest_dir_name}/")
+        return f"画像{copied}枚をUSBへ書き出しました（{len(failed)}枚失敗、{dest_dir_name}/フォルダ内）"
+
+    log(f"USBへの書き出しが完了しました（{copied}枚 → {dest_dir_name}/）")
+    return f"画像{copied}枚をUSBへ書き出しました（{dest_dir_name}/フォルダ内）"
+
+
 def parse_arg(arg):
     """systemdのインスタンス名（%i）から (デバイス名, イベント種別) を取り出す。
     例: "sda1-add" -> ("sda1", "add"), "sda1-remove" -> ("sda1", "remove")。
@@ -647,8 +760,17 @@ def handle_add(device_name):
     if not os.path.exists(device_path):
         sys.exit(f"device not found: {device_path}")
 
-    ok, err = mount_readonly(device_path)
+    # USB書き出し（吸い出し）機能：本体ボタンの長押しで明示的にアーム済みの
+    # 「待受け」状態かどうかを、マウント前に確認する。待受け中だけは
+    # 書き込みが必要になるため、通常時の読み取り専用マウントとはオプションを
+    # 分ける（合言葉ファイルの有無・一致自体はマウント後にtry_export_imagesで
+    # チェックする。ここではまだ書き出しを行うかどうかは決まっていない）。
+    want_export = bool(signage_state.load_export_standby(IMAGE_FOLDER))
+
+    ok, err = mount_device(device_path, read_write=want_export)
     if not ok:
+        if want_export:
+            err = f"{err}（USB書き出し待受け中は書き込み権限が必要です）"
         log(f"マウント失敗: {err}")
         signage_state.save_notice(IMAGE_FOLDER, f"USBメモリーを読み込めませんでした（{err}）", sticky=True)
         fix_ownership(IMAGE_FOLDER)
@@ -658,6 +780,7 @@ def handle_add(device_name):
         result = import_images(MOUNT_POINT, IMAGE_FOLDER)
         update_message = find_and_stage_update_package(MOUNT_POINT, IMAGE_FOLDER)
         settings_message = find_and_apply_settings_file(MOUNT_POINT, IMAGE_FOLDER)
+        export_message = try_export_images(MOUNT_POINT, IMAGE_FOLDER) if want_export else None
     finally:
         unmount()
 
@@ -673,6 +796,8 @@ def handle_add(device_name):
 
     if have_images:
         parts = [build_notice_message(result)]
+        if export_message:
+            parts.append(export_message)
         if update_message:
             parts.append(update_message)
         if settings_message:
@@ -681,6 +806,8 @@ def handle_add(device_name):
         signage_state.save_notice(IMAGE_FOLDER, message, sticky=True)
     else:
         parts = []
+        if export_message:
+            parts.append(export_message)
         if update_message:
             parts.append(update_message)
         if settings_message:

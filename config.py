@@ -99,6 +99,23 @@ STANDALONE_CHECK_INTERVAL = 120      # その後の再判定間隔（秒）※�
 SHUTDOWN_COMMAND = ["sudo", "/sbin/shutdown", "-h", "now"]
 SHUTDOWN_HOLD_SECONDS = 10           # QRボタンをこの秒数以上長押しするとシャットダウンする
 
+# USB書き出し（吸い出し）機能設定
+# 「今格納されている画像を全部USBメモリーに書き出したい」という要望への対応。
+# 誤操作・第三者による無断実行を防ぐため、二段階の確認を要求する：
+#   1. 本体ボタンをEXPORT_HOLD_SECONDS秒以上長押しして「書き出し待受けモード」に入る
+#   2. 待受け中に挿したUSBメモリーの直下に、Web設定画面で発行した合言葉ファイル
+#      （EXPORT_KEY_FILENAME）が置かれていて、内容が発行済みの合言葉と一致した
+#      場合だけ、実際に書き出しを行う
+# 合言葉が無い・一致しない場合は書き出しは行われず、通常のUSB取り込み動作だけが
+# 行われる（待受け状態はそのまま残り、USBを挿し直して再挑戦できる）。
+EXPORT_HOLD_SECONDS = 15              # ボタン長押しで書き出し待受けモードに入るまでの秒数
+                                       # （既存ラダーの中で最長。SHUTDOWN_HOLD_SECONDSより
+                                       #   長く設定すること＝判定順で最優先にする）
+EXPORT_STANDBY_TIMEOUT_SECONDS = 180  # 待受けモードのままUSBが挿されなかった場合に
+                                       # 自動キャンセルするまでの秒数
+EXPORT_KEY_FILENAME = "pophug-export-key.txt"  # USB直下に置く合言葉ファイル名（大文字小文字は区別しない）
+EXPORT_FOLDER_PREFIX = "pophug_export_"        # 書き出し先フォルダ名の接頭辞（末尾に日時が付く）
+
 # アップデート機能設定
 # GitHubのReleasesを更新配信先として使う。"ユーザー名/リポジトリ名"の形式。
 GITHUB_REPO = "yuntaku1122/pophug-signage"
