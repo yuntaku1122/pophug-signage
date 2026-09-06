@@ -304,6 +304,20 @@ def validate_settings_updates(raw_values):
         except (TypeError, ValueError):
             errors.append(("priority_interval", "数値ではありません（1〜50の範囲で指定してください）"))
 
+    if "image_prefetch_window" in raw_values:
+        try:
+            v = max(1, min(int(float(raw_values["image_prefetch_window"])), 10))
+            valid["image_prefetch_window"] = v
+        except (TypeError, ValueError):
+            errors.append(("image_prefetch_window", "数値ではありません（1〜10の範囲で指定してください）"))
+
+    if "max_pinned_images" in raw_values:
+        try:
+            v = max(1, min(int(float(raw_values["max_pinned_images"])), 20))
+            valid["max_pinned_images"] = v
+        except (TypeError, ValueError):
+            errors.append(("max_pinned_images", "数値ではありません（1〜20の範囲で指定してください）"))
+
     if "transition_type" in raw_values:
         v = str(raw_values["transition_type"]).strip()
         if v in VALID_TRANSITION_TYPES:

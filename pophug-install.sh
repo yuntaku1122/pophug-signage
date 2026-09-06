@@ -118,7 +118,7 @@ if [ "$APP_DIR" != "$EXPECTED_DIR" ]; then
 fi
 
 echo ""
-echo "--- 1/8: OSパッケージのインストール ---"
+echo "--- 1/10: OSパッケージのインストール ---"
 sudo apt-get update
 # fonts-noto-cjk: 日本語フォント。main.pyのget_japanese_fontが
 # /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc を候補として
@@ -130,7 +130,7 @@ sudo apt-get update
 sudo apt-get install -y python3-venv python3-pip git exfatprogs fonts-noto-cjk
 
 echo ""
-echo "--- 2/8: Python仮想環境の構築 ---"
+echo "--- 2/10: Python仮想環境の構築 ---"
 # --system-site-packages 付きで作る。pygame・gpiozeroは、Raspberry Pi OSの
 # aptパッケージ版（python3-pygame等）がハードウェア（kmsdrmでの画面描画、
 # GPIOアクセス）向けに最適化されているのに対し、pipが取得するpygameは
@@ -159,7 +159,7 @@ fi
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
 echo ""
-echo "--- 3/8: ヘルパースクリプトの配置（root所有・実行専用） ---"
+echo "--- 3/10: ヘルパースクリプトの配置（root所有・実行専用） ---"
 for script in pophug-netctl pophug-update-apply pophug-usb-import pophug-hostname-setup; do
     if [ ! -f "$APP_DIR/$script" ]; then
         echo "  ⚠ $script が見つからないためスキップします"
@@ -172,7 +172,7 @@ for script in pophug-netctl pophug-update-apply pophug-usb-import pophug-hostnam
 done
 
 echo ""
-echo "--- 4/8: sudoers設定（各ヘルパー単体だけをパスワード無しで許可） ---"
+echo "--- 4/10: sudoers設定（各ヘルパー単体だけをパスワード無しで許可） ---"
 SHUTDOWN_PATH="$(command -v shutdown)"
 echo "pophug ALL=(ALL) NOPASSWD: $SHUTDOWN_PATH -h now" | sudo tee /etc/sudoers.d/pophug-shutdown > /dev/null
 sudo chmod 440 /etc/sudoers.d/pophug-shutdown
@@ -189,7 +189,7 @@ echo "  ※ upload_server.pyのSHUTDOWN_COMMANDが上記のシャットダウン
 echo "    一致しているか、念のため確認しておくこと（$SHUTDOWN_PATH）"
 
 echo ""
-echo "--- 5/8: systemdユニットの配置 ---"
+echo "--- 5/10: systemdユニットの配置 ---"
 sudo cp "$APP_DIR/pophug-signage.service" /etc/systemd/system/
 sudo cp "$APP_DIR/pophug-hostname-setup.service" /etc/systemd/system/
 
@@ -207,12 +207,12 @@ else
 fi
 
 echo ""
-echo "--- 6/8: USBメモリー自動検出（udevルール）の設定 ---"
+echo "--- 6/10: USBメモリー自動検出（udevルール）の設定 ---"
 sudo cp "$APP_DIR/99-pophug-usb.rules" /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 
 echo ""
-echo "--- 7/8: サービスの有効化・GPIOアクセス権限の確認 ---"
+echo "--- 7/10: サービスの有効化・GPIOアクセス権限の確認 ---"
 sudo systemctl daemon-reload
 sudo systemctl enable pophug-hostname-setup.service
 sudo systemctl enable pophug-signage.service
@@ -230,7 +230,7 @@ for grp in gpio video render input dialout plugdev; do
 done
 
 echo ""
-echo "--- 8/8: 起動モードをCLI（コンソール）に設定 ---"
+echo "--- 8/10: 起動モードをCLI（コンソール）に設定 ---"
 # pophug-signageの画面描画はpygame+kmsdrmで、デスクトップ環境（X11等）を
 # 介さず直接画面（/dev/dri）を掴む方式のため、デスクトップ環境は本来不要。
 # CLIモード（multi-user.target）にしておくことで、デスクトップ環境の
@@ -251,6 +251,86 @@ else
     echo "  ⚠ 現在の起動モード（$CURRENT_BOOT_TARGET）を認識できなかったため、変更をスキップしました"
     echo "    手動で切り替えたい場合: sudo systemctl set-default multi-user.target"
 fi
+
+echo ""
+echo "--- 9/10: 画面解像度の明示的な固定（video=パラメータ） ---"
+# 【2026-09の実機トラブルから追加】cmdline.txtにvideo=パラメータが無いと、
+# カーネル/DRMドライバは接続したモニターのEDID情報から解像度を自動決定する。
+# ある実機で、たまたま接続したモバイルディスプレイのpreferredモードが
+# 1920x1080になり、その時点で動作確認済みだった1280x720（720p）の2.25倍の
+# ピクセル数で動いてしまい、Pi Zero 2W（RAM 512MB）のメモリを圧迫してOOM
+# Killerによる強制再起動ループを引き起こした実例がある。
+#
+# 【2026-09の設計変更で解消】原因は「全画像を常駐メモリーに保持していたこと」
+# であり、解像度そのものが問題だったわけではなかった。main.py側の画像
+# キャッシュを「固定表示の画像だけ常駐、それ以外は表示中+数枚先までの
+# ウィンドウだけ保持」する方式に変更したことで、常駐メモリー使用量が
+# 画像の総枚数ではなく「固定表示枚数（MAX_PINNED_IMAGES）＋先読み枚数
+# （IMAGE_PREFETCH_WINDOW）」でほぼ頭打ちになるようになったため、1080pでの
+# 運用も安全に行えるようになった。そのため、このスクリプトの既定値は
+# 1920x1080（フルHD）としている。
+#
+# 接続するモニターの型番・向きによって適切な値は変わり得るため、
+# 環境変数 POPHUG_VIDEO_MODE で上書きできるようにしてある
+# （例: POPHUG_VIDEO_MODE="HDMI-A-1:1280x720@60" bash pophug-install.sh ）。
+# 既にvideo=が（値を問わず）設定済みの場合は、意図的な設定を上書きしないよう
+# 何もしない（このスクリプトの「既存設定は上書きしない」という冪等性の方針に
+# 合わせている）。
+POPHUG_VIDEO_MODE="${POPHUG_VIDEO_MODE:-HDMI-A-1:1920x1080@60}"
+
+CMDLINE_PATH=""
+if [ -f /boot/firmware/cmdline.txt ]; then
+    CMDLINE_PATH="/boot/firmware/cmdline.txt"
+elif [ -f /boot/cmdline.txt ]; then
+    CMDLINE_PATH="/boot/cmdline.txt"
+fi
+
+if [ -z "$CMDLINE_PATH" ]; then
+    echo "  ⚠ cmdline.txtが見つからなかったため、解像度の固定をスキップしました"
+    echo "    手動で設定したい場合、/boot/firmware/cmdline.txt（または/boot/cmdline.txt）の"
+    echo "    末尾に半角スペース区切りで video=${POPHUG_VIDEO_MODE} を追記してください"
+elif grep -q "video=" "$CMDLINE_PATH"; then
+    echo "  既にvideo=パラメータが設定済みのため変更しませんでした（$CMDLINE_PATH）"
+    echo "  現在の内容: $(cat "$CMDLINE_PATH")"
+else
+    sudo cp "$CMDLINE_PATH" "${CMDLINE_PATH}.pophug-install.bak"
+    sudo sed -i "s/\$/ video=${POPHUG_VIDEO_MODE}/" "$CMDLINE_PATH"
+    echo "  video=${POPHUG_VIDEO_MODE} を追記しました（$CMDLINE_PATH）"
+    echo "  バックアップ: ${CMDLINE_PATH}.pophug-install.bak"
+    echo "  ※ 実際にこの解像度で起動しているかは、再起動後に以下で確認できます:"
+    echo "    SDL_VIDEODRIVER=kmsdrm python3 -c \"import pygame; pygame.display.init(); print(pygame.display.Info())\""
+fi
+
+echo ""
+echo "--- 10/10: 不要なデスクトップ向け音声サービスの無効化 ---"
+# 【2026-09の実機トラブルから追加】pophug-signageは画面描画にpygame+kmsdrmを
+# 直接使い、音声は一切再生しない（pygame.mixerも未使用）。にもかかわらず、
+# Raspberry Pi OSのイメージにはデスクトップ向けの音声セッション管理一式
+# （pipewire, pipewire-pulse, wireplumber, mpris-proxy等）がユーザーセッションの
+# デフォルトサービスとして含まれており、ヘッドレス運用でも自動起動してしまう。
+# これらは常時数十MBのメモリと若干のCPUを消費し続け（存在しないALSAデバイスへの
+# 初期化・recover処理を延々と繰り返すこともある）、Pi Zero 2W（RAM 512MB）では
+# 無視できない負荷になる。今回の根本原因ではなかったが、メモリに余裕を持たせる
+# 対策として、新規セットアップ時にまとめて無効化しておく。
+#
+# systemctl --user はユーザーセッションが必要なため、SSH等の対話セッション無しで
+# 実行されるとエラーになることがある。その場合でも他のインストール手順を
+# 止めないよう、失敗は無視する（|| true）。
+DESKTOP_AUDIO_UNITS="pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service mpris-proxy.service filter-chain.service xdg-permission-store.service"
+DISABLED_ANY=0
+for unit in $DESKTOP_AUDIO_UNITS; do
+    if systemctl --user disable --now "$unit" > /dev/null 2>&1; then
+        DISABLED_ANY=1
+    fi
+    systemctl --user mask "$unit" > /dev/null 2>&1 || true
+done
+if [ "$DISABLED_ANY" = "1" ]; then
+    echo "  デスクトップ向け音声サービス（pipewire等）を無効化しました"
+else
+    echo "  対象の音声サービスは見つからなかった、または既に無効化済みでした"
+fi
+echo "  （元に戻したい場合: systemctl --user unmask <サービス名> の後、"
+echo "    systemctl --user enable --now <サービス名>）"
 
 # ---- 再起動後の案内メッセージの組み立て ----
 # pophug-hostname-setupは「ホスト名が初期値 'pophug' のままかどうか」だけで

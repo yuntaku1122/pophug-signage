@@ -111,8 +111,15 @@ class PopSignage:
         self.font_medium = get_japanese_font(36)
         self.font_small = get_japanese_font(24)
 
-        self.pop_images = []          # 表示用にスケール済みSurfaceのリスト（優先表示の割り込み込みの表示順）
-        self._image_cache = {}        # ファイル名 -> スケール済みSurface（変更が無ければ再利用）
+        self.ordered_files = []       # 表示順のファイル名リスト（優先表示の割り込み込み）。
+                                       # Surface本体ではなくファイル名だけを持つ軽量なリストで、
+                                       # 実際の画像データはpinned/windowキャッシュから都度取得する
+        self._pinned_cache = {}       # 固定表示ファイル名 -> スケール済みSurface（常駐。表示対象で
+                                       # ある限り破棄しない）
+        self._window_cache = {}       # 通常ファイル名 -> スケール済みSurface（表示中+数枚先の分だけ
+                                       # 保持。範囲外に出たものは_ensure_window_cached()が破棄する）
+        self._broken_files = set()    # デコードに失敗したファイル名（無限に再試行しないための記録。
+                                       # 次回のフォルダ再スキャンで対象から自動的に除外される）
         self._image_mtimes = {}       # ファイル名 -> mtime（デコードキャッシュの再利用判定用）
         self._image_state_key = None  # (mtimes, 優先タグ, 割り込み間隔) の組。変化検知用
         self.current_pop_index = 0
@@ -233,7 +240,14 @@ class PopSignage:
             "transition_type": TRANSITION_TYPE,
             "rotation": ROTATE_SCREEN,
             "image_fit_mode": IMAGE_FIT_MODE,
+            "image_prefetch_window": IMAGE_PREFETCH_WINDOW,
         })
+
+        new_prefetch_window = settings.get("image_prefetch_window", IMAGE_PREFETCH_WINDOW)
+        if new_prefetch_window != globals().get("IMAGE_PREFETCH_WINDOW"):
+            globals()["IMAGE_PREFETCH_WINDOW"] = new_prefetch_window
+            log(f"先読み枚数を更新: {new_prefetch_window}枚"
+                f"（固定表示は対象外。常駐メモリーは固定表示分+この枚数でほぼ頭打ちになる）")
 
         new_duration = settings.get("transition_duration", TRANSITION_DURATION)
         if new_duration != globals().get("TRANSITION_DURATION"):
@@ -259,9 +273,11 @@ class PopSignage:
             # （ファイル自体は変わっていないので、mtimeベースの再利用ロジックだけでは
             # 古い表示方式のキャッシュが使われ続けてしまう）
             with self._lock:
-                self._image_cache = {}
+                self._pinned_cache = {}
+                self._window_cache = {}
                 self._image_mtimes = {}
                 self._image_state_key = None
+                self._broken_files = set()
             self.load_pop_images(initial=True)
 
         new_rotation = settings.get("rotation", ROTATE_SCREEN)
@@ -280,9 +296,11 @@ class PopSignage:
             self.canvas = pygame.Surface((sw, sh))
 
         with self._lock:
-            self._image_cache = {}
+            self._pinned_cache = {}
+            self._window_cache = {}
             self._image_mtimes = {}
             self._image_state_key = None
+            self._broken_files = set()
         self.load_pop_images(initial=True)
 
     @staticmethod
@@ -315,14 +333,24 @@ class PopSignage:
 
     def load_pop_images(self, initial=False):
         """images/ フォルダを読み込み、新しい画像や優先表示設定の変更があれば反映する。
-        アップロードサーバーから随時追加される画像を検知するため定期的に呼ばれる。"""
+        アップロードサーバーから随時追加される画像を検知するため定期的に呼ばれる。
+
+        【2026-09の実機トラブルを受けての変更】以前はここで表示対象の全画像を
+        まとめてデコード・スケーリングして常駐メモリーに保持していたが、画像の
+        枚数・解像度によってはPi Zero 2W（RAM 512MB）のメモリを圧迫する要因に
+        なり得ることが分かった。表示順（ordered_files）は一覧として確定できる
+        ので、実際のSurfaceデータは「固定表示（📌）は常に全件常駐」「それ以外は
+        表示中+数枚先までのウィンドウだけ保持」という方式に変更し、常駐メモリーが
+        画像の総枚数ではなく固定表示分+ウィンドウ幅でほぼ頭打ちになるようにした。
+        実際の先読み・不要分の破棄は_ensure_window_cached()が毎フレーム少しずつ行う
+        （ここでは表示順の確定と、固定表示分のキャッシュ更新だけを行う）。"""
         supported = ('.jpg', '.jpeg', '.png')
         if not os.path.exists(IMAGE_FOLDER):
             os.makedirs(IMAGE_FOLDER)
 
         files = sorted(f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(supported))
         hidden = load_hidden(IMAGE_FOLDER)
-        files = [f for f in files if f not in hidden]
+        files = [f for f in files if f not in hidden and f not in self._broken_files]
         mtimes = {f: os.path.getmtime(os.path.join(IMAGE_FOLDER, f)) for f in files}
 
         priority_map = load_priority(IMAGE_FOLDER)
@@ -332,49 +360,144 @@ class PopSignage:
         except (TypeError, ValueError):
             interval = PRIORITY_INTERVAL
 
-        # 変化検知: ファイルの追加/削除/更新だけでなく、優先表示タグや割り込み間隔の
-        # 変更でも表示順序の再構築が必要なため、それらもキーに含める
+        pinned = load_pinned(IMAGE_FOLDER) & set(files)
+
+        # 変化検知: ファイルの追加/削除/更新だけでなく、優先表示タグ・割り込み間隔・
+        # 固定表示状態の変更でも表示順序や常駐キャッシュの再構築が必要なため、
+        # それらもキーに含める
         state_key = (
             tuple(sorted(mtimes.items())),
             tuple(sorted((k, v) for k, v in priority_map.items() if k in mtimes)),
             interval,
+            tuple(sorted(pinned)),
         )
         if state_key == self._image_state_key:
             return  # 変化なし
 
         ordered_files = self._build_ordered_files(files, priority_map, interval)
 
-        w = self.canvas.get_width()
-        h = self.canvas.get_height()
-        new_cache = {}
-        for f in files:
-            if f in self._image_cache and self._image_mtimes.get(f) == mtimes[f]:
-                # ファイル自体は変わっていない（表示/非表示・優先表示の切替だけ）ので再デコードしない
-                new_cache[f] = self._image_cache[f]
-                continue
-            path = os.path.join(IMAGE_FOLDER, f)
-            try:
-                img = pygame.image.load(path).convert()
-                img = self._fit_image(img, w, h)
-                new_cache[f] = img
-            except Exception as e:
-                log(f"画像読み込みエラー: {f} - {e}")
-
-        new_images = [new_cache[f] for f in ordered_files if f in new_cache]
+        new_pinned_cache = {}
+        for f in pinned:
+            if f in self._pinned_cache and self._image_mtimes.get(f) == mtimes.get(f):
+                # ファイル自体は変わっていない（既に固定表示だった）ので再デコードしない
+                new_pinned_cache[f] = self._pinned_cache[f]
+            else:
+                surf = self._decode_and_fit(f)
+                if surf is not None:
+                    new_pinned_cache[f] = surf
+                else:
+                    self._broken_files.add(f)
 
         with self._lock:
-            self.pop_images = new_images
-            self._image_cache = new_cache
+            self._pinned_cache = new_pinned_cache
+            # ウィンドウキャッシュは、固定表示に昇格した・削除された・内容が
+            # 更新されたファイルだけをここで掃除する。実際の先読み（表示中+
+            # 数枚先のデコード）はまとめて行わず_ensure_window_cached()に委ねる
+            # （これが「全画像を常駐させない」ための肝の部分）。
+            self._window_cache = {
+                f: surf for f, surf in self._window_cache.items()
+                if f in mtimes and f not in pinned and self._image_mtimes.get(f) == mtimes.get(f)
+            }
+            self.ordered_files = ordered_files
             self._image_mtimes = mtimes
             self._image_state_key = state_key
-            if self.current_pop_index >= len(self.pop_images):
+            if self.current_pop_index >= len(self.ordered_files):
                 self.current_pop_index = 0
             self.next_pop_index = self.current_pop_index
 
         if not initial:
             priority_count = len([f for f in files if f in priority_map])
-            log(f"画像フォルダを再スキャン: {len(new_images)}枚表示（うち優先表示 {priority_count}枚、"
-                f"{interval}枚ごとに割り込み）")
+            log(f"画像フォルダを再スキャン: {len(ordered_files)}枚表示（うち優先表示 {priority_count}枚、"
+                f"{interval}枚ごとに割り込み、固定表示 {len(pinned)}枚は常駐キャッシュ）")
+
+    def _decode_and_fit(self, filename):
+        """images/内の指定ファイルをデコードし、現在のキャンバスサイズに合わせて
+        スケーリングしたSurfaceを返す。失敗時はNoneを返し、ログに理由を残す
+        （呼び出し側はこれをbroken_filesに記録し、以後の表示対象から除外する）。"""
+        path = os.path.join(IMAGE_FOLDER, filename)
+        try:
+            img = pygame.image.load(path).convert()
+        except Exception as e:
+            log(f"画像読み込みエラー: {filename} - {e}")
+            return None
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
+        return self._fit_image(img, w, h)
+
+    def _get_surface(self, filename):
+        """指定ファイルの表示用Surfaceを返す。固定表示キャッシュ・ウィンドウ
+        キャッシュのどちらにも既に無い場合（起動直後でまだ先読みが追いついて
+        いない等）は、その場でデコードしてウィンドウキャッシュに追加してから
+        返す（表示が欠けることは無いが、この時だけ軽い処理落ちの可能性がある）。
+        デコードに失敗した場合はNoneを返し、当該ファイルを表示順から除外する
+        （次回のフォルダ再スキャンを待たず、その場で表示対象から外す）。"""
+        with self._lock:
+            surf = self._pinned_cache.get(filename)
+            if surf is None:
+                surf = self._window_cache.get(filename)
+        if surf is not None:
+            return surf
+
+        surf = self._decode_and_fit(filename)
+        with self._lock:
+            if surf is not None:
+                self._window_cache[filename] = surf
+            else:
+                self._broken_files.add(filename)
+                if filename in self.ordered_files:
+                    self.ordered_files = [f for f in self.ordered_files if f != filename]
+                    if self.current_pop_index >= len(self.ordered_files):
+                        self.current_pop_index = 0
+                    self.next_pop_index = self.current_pop_index
+        return surf
+
+    def _ensure_window_cached(self):
+        """現在の表示位置からIMAGE_PREFETCH_WINDOW枚先までの通常画像（固定表示を
+        除く）を先読みする。1回の呼び出しにつき最大1枚だけデコードする（まとめて
+        デコードすると、そのフレームだけ処理落ちする可能性があるため意図的に
+        小分けにしている）。ウィンドウの外に出た画像は破棄し、常駐メモリーが
+        画像の総枚数ではなくウィンドウ幅でほぼ頭打ちになるようにする
+        （固定表示分は対象外。常に別枠で保持され続ける）。
+
+        表示順（ordered_files）には固定表示画像も通常の並びの中に混在している
+        ため、単純に「現在位置からwindow_size件」を切り出すと、その中に固定
+        表示画像が含まれる分だけ通常画像の実質的な先読み枚数が減ってしまう
+        （固定表示は既に別キャッシュで常駐済みなので、ここでは無視して読み飛ばし、
+        その分さらに先まで見て通常画像をwindow_size枚ちょうど集める）。"""
+        with self._lock:
+            ordered = list(self.ordered_files)
+            cur_idx = self.current_pop_index
+            pinned_keys = set(self._pinned_cache.keys())
+
+        n = len(ordered)
+        if n == 0:
+            return
+
+        window_size = min(IMAGE_PREFETCH_WINDOW, n)
+        desired_normal = []
+        seen = set()
+        for i in range(n):  # 最大1周分だけ辿る（全件固定表示等の極端な場合でも無限ループしない）
+            f = ordered[(cur_idx + i) % n]
+            if f in pinned_keys or f in seen:
+                continue
+            seen.add(f)
+            desired_normal.append(f)
+            if len(desired_normal) >= window_size:
+                break
+        desired_set = set(desired_normal)
+
+        with self._lock:
+            # ウィンドウ外に出た通常画像はここで解放する
+            self._window_cache = {
+                f: surf for f, surf in self._window_cache.items() if f in desired_set
+            }
+            missing = [f for f in desired_normal if f not in self._window_cache]
+
+        if not missing:
+            return
+
+        # 1フレームにつき1枚だけ先読みデコードする
+        self._get_surface(missing[0])
 
     @staticmethod
     def _fit_image(img, w, h):
@@ -1437,49 +1560,70 @@ class PopSignage:
     # ---------------- 描画 ----------------
 
     def draw_pop_mode(self):
+        # 表示中+数枚先までの通常画像を、1フレームにつき最大1枚だけ先読みする
+        # （固定表示画像は常に別枠で常駐しているため対象外）
+        self._ensure_window_cached()
+
         with self._lock:
-            images = self.pop_images
+            ordered = self.ordered_files
             cur_idx = self.current_pop_index
             next_idx = self.next_pop_index
 
-        if not images:
+        if not ordered:
             # 写真が1枚も無い（＝購入直後の無垢な状態）場合は、
             # 「画像がありません」ではなく取扱説明を自動的にループ表示する
             self.draw_manual_screen()
+            return
+
+        n = len(ordered)
+        current_img = self._get_surface(ordered[cur_idx % n])
+        if current_img is None:
+            # デコード失敗によりその場でordered_filesから除外された等、
+            # 今回のフレームだけ取得できなかった場合は何も描かずスキップする
+            # （次フレームでは更新後のordered_filesを基準に再評価される）
             return
 
         if self.qr_active:
             # QR表示中はスライドショーを一時停止する。時間の巻き戻しは
             # show_qr_code/_hide_qr側で行うので、ここでは現在の画像を
             # そのまま静止表示するだけでよい（切り替え判定は一切行わない）。
-            self.canvas.blit(images[cur_idx % len(images)], (0, 0))
+            self.canvas.blit(current_img, (0, 0))
             return
 
         now = time.time()
         elapsed = now - self.pop_start_time
 
-        if elapsed >= IMAGE_INTERVAL and not self.in_transition and len(images) > 1:
+        if elapsed >= IMAGE_INTERVAL and not self.in_transition and n > 1:
             self.in_transition = True
-            self.next_pop_index = (cur_idx + 1) % len(images)
-            next_idx = self.next_pop_index
+            with self._lock:
+                self.next_pop_index = (cur_idx + 1) % n
+                next_idx = self.next_pop_index
             self.transition_start_time = now
 
         if self.in_transition:
+            next_img = self._get_surface(ordered[next_idx % n])
+            if next_img is None:
+                # 次画像の取得に失敗。この回の遷移は諦めて現在の画像のまま
+                # 据え置き、次フレームで態勢を立て直す
+                self.in_transition = False
+                self.canvas.blit(current_img, (0, 0))
+                return
+
             # 実フレームレートに関わらず、指定した秒数ちょうどで切り替わるよう
             # 実経過時間を基準にprogressを計算する（フレーム数基準だと、
             # 非力な機器で実際のFPSが落ちた時に想定より大幅に長くなってしまうため）
             trans_elapsed = now - self.transition_start_time
             progress = min(trans_elapsed / TRANSITION_DURATION, 1.0)
 
-            self._draw_transition_frame(
-                images[cur_idx % len(images)], images[next_idx % len(images)], progress)
+            self._draw_transition_frame(current_img, next_img, progress)
 
             if progress >= 1.0:
-                self.current_pop_index = next_idx
+                with self._lock:
+                    self.current_pop_index = next_idx
                 self.pop_start_time = now
                 self.in_transition = False
         else:
-            self.canvas.blit(images[cur_idx % len(images)], (0, 0))
+            self.canvas.blit(current_img, (0, 0))
 
     def _draw_transition_frame(self, current_img, next_img, progress):
         """TRANSITION_TYPEに応じた切り替え効果を1フレーム分描画する。

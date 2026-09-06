@@ -63,6 +63,16 @@ except ImportError:
     DEFAULT_PRIORITY_INTERVAL = 5
 
 try:
+    from config import IMAGE_PREFETCH_WINDOW as DEFAULT_IMAGE_PREFETCH_WINDOW
+except ImportError:
+    DEFAULT_IMAGE_PREFETCH_WINDOW = 3
+
+try:
+    from config import MAX_PINNED_IMAGES as DEFAULT_MAX_PINNED_IMAGES
+except ImportError:
+    DEFAULT_MAX_PINNED_IMAGES = 10
+
+try:
     from config import WIFI_SETUP_SSID_PREFIX, WIFI_SETUP_DEFAULT_PASSWORD
 except ImportError:
     WIFI_SETUP_SSID_PREFIX = "pophug-setup"
@@ -165,6 +175,20 @@ UPLOAD_PAGE = """
                      font-size:11px; padding:3px 8px; border-radius:10px; }
   .pin-badge { position:absolute; top:8px; right:8px; background:#3a6b8a; color:#fff;
                 font-size:11px; padding:3px 8px; border-radius:10px; }
+  .item-thumb { cursor:pointer; }
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6);
+                    z-index:1000; align-items:center; justify-content:center; padding:20px;
+                    box-sizing:border-box; }
+  .modal-overlay.is-open { display:flex; }
+  .modal-content { background:#fff; border-radius:14px; padding:20px; width:100%;
+                    max-width:360px; max-height:90vh; overflow-y:auto; position:relative; }
+  .modal-close { position:absolute; top:10px; right:10px; width:32px; height:32px;
+                  border-radius:50%; border:none; background:#eee; color:#555;
+                  font-size:18px; line-height:1; padding:0; }
+  .modal-img { width:100%; max-height:50vh; object-fit:contain; border-radius:8px;
+                background:#f0f0f0; display:block; margin-bottom:4px; }
+  .modal-filename { font-size:12px; color:#888; word-break:break-all; text-align:center;
+                      margin:0 0 12px; }
   .setting-row { margin-top:16px; }
   .setting-row label { font-size:14px; color:#333; display:flex; justify-content:space-between; }
   .setting-row input[type=range] { width:100%; margin:10px 0 4px; accent-color:#228b22; }
@@ -204,6 +228,32 @@ UPLOAD_PAGE = """
   <p class="hint">スイッチON＝サイネージに表示中。切り替えると即座に保存され、サイネージには最大__RESCAN_SEC__秒で反映されます。</p>
   <div class="gallery">
     __GALLERY__
+  </div>
+
+  <div class="modal-overlay" id="image-modal-overlay">
+    <div class="modal-content">
+      <button type="button" class="modal-close" id="modal-close-btn" aria-label="閉じる">×</button>
+      <img class="modal-img" id="modal-img" src="" alt="">
+      <p class="modal-filename" id="modal-filename"></p>
+      <div class="switch-row">
+        <label class="switch">
+          <input type="checkbox" class="modal-toggle-cb" id="modal-toggle-cb">
+          <span class="slider"></span>
+        </label>
+        <span class="switch-label" id="modal-toggle-label">表示中</span>
+      </div>
+      <div class="switch-row">
+        <label class="switch">
+          <input type="checkbox" class="modal-pin-cb" id="modal-pin-cb">
+          <span class="slider"></span>
+        </label>
+        <span class="switch-label" id="modal-pin-label">固定表示ではない</span>
+      </div>
+      <select class="priority-select" id="modal-priority-select">
+        __MODAL_PRIORITY_OPTIONS__
+      </select>
+      <button type="button" class="delete-btn" id="modal-delete-btn">削除</button>
+    </div>
   </div>
 
   <div class="box" style="margin-top:24px;">
@@ -249,6 +299,36 @@ UPLOAD_PAGE = """
       <input type="range" id="priority-interval-slider" min="1" max="20" step="1"
              value="__PRIORITY_INTERVAL__">
       <p class="setting-status" id="priority-interval-status"></p>
+    </div>
+  </div>
+
+  <div class="box" style="margin-top:16px;">
+    <h1>画像キャッシュ・固定表示の上限</h1>
+    <p class="hint" style="margin:0 0 12px;">
+      本体は「固定表示（📌）の画像」だけを常にメモリー上に保持し、通常の写真は
+      表示中とその少し先の分だけを先読みして保持します（画像の総枚数が多くても
+      メモリー使用量が際限なく増えないようにするための仕組みです）。
+      解像度を1080p等に上げる場合や、Piの動作が重いと感じる場合は、
+      先読み枚数を減らすとメモリーに余裕を持たせられます。
+    </p>
+    <div class="setting-row">
+      <label>先読みする通常画像の枚数
+        <span id="prefetch-window-value">__IMAGE_PREFETCH_WINDOW__</span>枚先まで</label>
+      <input type="range" id="prefetch-window-slider" min="1" max="10" step="1"
+             value="__IMAGE_PREFETCH_WINDOW__">
+      <p class="hint" style="margin:4px 0 0;">多いほど切り替え時の表示が滑らかになりますが、
+        その分メモリーを多く使います（固定表示の画像は含みません）。</p>
+      <p class="setting-status" id="prefetch-window-status"></p>
+    </div>
+    <div class="setting-row">
+      <label>固定表示（📌）にできる上限枚数
+        <span id="max-pinned-value">__MAX_PINNED_IMAGES__</span>枚まで</label>
+      <input type="range" id="max-pinned-slider" min="1" max="20" step="1"
+             value="__MAX_PINNED_IMAGES__">
+      <p class="hint" style="margin:4px 0 0;">固定表示は常に全件メモリーに保持されるため、
+        上限を超えて新たに固定表示にすることはできません（既存の固定表示はそのまま残ります。
+        減らしたい場合はWeb画面から手動で解除してください）。</p>
+      <p class="setting-status" id="max-pinned-status"></p>
     </div>
   </div>
 
@@ -315,8 +395,17 @@ UPLOAD_PAGE = """
         },
         body: 'filename=' + encodeURIComponent(filename)
       })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
+        .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+        .then(function (result) {
+          var data = result.data;
+          if (!result.ok) {
+            // 上限到達等でサーバー側に拒否された場合は、スイッチを元に戻して理由を表示する
+            cb.checked = !wasChecked;
+            label.textContent = data.error || '更新できませんでした';
+            label.classList.remove('is-updating');
+            window.alert(data.error || '固定表示を変更できませんでした');
+            return;
+          }
           if (data.renamed) {
             // ファイル名が変わった（fixed_接頭辞の付け外し）＝この要素が持つ
             // data-filename（このチェックボックス・削除ボタン・優先表示セレクトなど）が
@@ -345,7 +434,7 @@ UPLOAD_PAGE = """
     });
   });
 
-  document.querySelectorAll('.delete-btn').forEach(function (btn) {
+  document.querySelectorAll('.gallery .delete-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var filename = this.dataset.filename;
       var confirmed = window.confirm(
@@ -385,7 +474,7 @@ UPLOAD_PAGE = """
     });
   });
 
-  document.querySelectorAll('.priority-select').forEach(function (select) {
+  document.querySelectorAll('.gallery .priority-select').forEach(function (select) {
     select.addEventListener('change', function () {
       var filename = this.dataset.filename;
       var tag = this.value;
@@ -430,6 +519,273 @@ UPLOAD_PAGE = """
   </script>
 
   <script>
+  // プレビューモーダル: サムネイルをクリックすると、大きな画像と一緒に
+  // 表示/非表示・固定表示・優先表示の設定をその場で変更できる。
+  // 価格だけが違う等、一覧の小さなサムネイルでは見分けにくい画像を選ぶ時に
+  // 役立つ。ここで使うチェックボックス等は、グリッド側の.toggle-cb等とは
+  // あえて別クラス（modal-toggle-cb等）にしてあり、ページ読み込み時に
+  // querySelectorAllで一括登録される既存のグリッド側の処理には一切影響しない。
+  // 操作結果は、開いた瞬間に対応付けたfilenameを使って、グリッド側の
+  // 該当カード（#item-<filename>）にもその場で反映する。
+  (function () {
+    var overlay = document.getElementById('image-modal-overlay');
+    var img = document.getElementById('modal-img');
+    var filenameLabel = document.getElementById('modal-filename');
+    var toggleCb = document.getElementById('modal-toggle-cb');
+    var toggleLabel = document.getElementById('modal-toggle-label');
+    var pinCb = document.getElementById('modal-pin-cb');
+    var pinLabel = document.getElementById('modal-pin-label');
+    var prioritySelect = document.getElementById('modal-priority-select');
+    var deleteBtn = document.getElementById('modal-delete-btn');
+    var currentFilename = null;
+
+    function closeModal() {
+      overlay.classList.remove('is-open');
+      currentFilename = null;
+    }
+
+    function openModalFor(filename) {
+      var item = document.getElementById('item-' + filename);
+      if (!item) {
+        return;
+      }
+      currentFilename = filename;
+      img.src = '/img/' + filename;
+      filenameLabel.textContent = filename;
+
+      var gridToggle = item.querySelector('.toggle-cb');
+      toggleCb.checked = gridToggle ? gridToggle.checked : true;
+      toggleLabel.textContent = toggleCb.checked ? '表示中' : '非表示中';
+
+      var gridPin = item.querySelector('.pin-cb');
+      pinCb.checked = gridPin ? gridPin.checked : false;
+      pinLabel.textContent = pinCb.checked ? '固定表示中' : '固定表示ではない';
+
+      var gridSelect = item.querySelector('.priority-select');
+      prioritySelect.value = gridSelect ? gridSelect.value : 'normal';
+      prioritySelect.dataset.currentTag = prioritySelect.value;
+
+      deleteBtn.disabled = false;
+      deleteBtn.textContent = '削除';
+
+      overlay.classList.add('is-open');
+    }
+
+    document.querySelectorAll('.item-thumb').forEach(function (thumb) {
+      thumb.addEventListener('click', function () {
+        openModalFor(this.dataset.filename);
+      });
+    });
+
+    document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) {
+        closeModal();
+      }
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && overlay.classList.contains('is-open')) {
+        closeModal();
+      }
+    });
+
+    toggleCb.addEventListener('change', function () {
+      if (!currentFilename) {
+        return;
+      }
+      var filename = currentFilename;
+      var item = document.getElementById('item-' + filename);
+      var gridToggle = item ? item.querySelector('.toggle-cb') : null;
+      var gridLabel = item ? item.querySelector('.switch-label') : null;
+      var wasChecked = this.checked;
+      toggleLabel.textContent = '更新中...';
+
+      fetch('/toggle', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'filename=' + encodeURIComponent(filename)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          toggleLabel.textContent = data.hidden ? '非表示中' : '表示中';
+          if (item) {
+            item.classList.toggle('is-hidden', data.hidden);
+          }
+          if (gridToggle) {
+            gridToggle.checked = !data.hidden;
+          }
+          if (gridLabel) {
+            gridLabel.textContent = data.hidden ? '非表示中' : '表示中';
+          }
+        })
+        .catch(function () {
+          toggleCb.checked = !wasChecked;
+          toggleLabel.textContent = '更新に失敗しました';
+        });
+    });
+
+    pinCb.addEventListener('change', function () {
+      if (!currentFilename) {
+        return;
+      }
+      var filename = currentFilename;
+      var wasChecked = this.checked;
+      pinLabel.textContent = '更新中...';
+
+      fetch('/toggle-pinned', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'filename=' + encodeURIComponent(filename)
+      })
+        .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+        .then(function (result) {
+          var data = result.data;
+          if (!result.ok) {
+            pinCb.checked = !wasChecked;
+            pinLabel.textContent = data.error || '更新できませんでした';
+            window.alert(data.error || '固定表示を変更できませんでした');
+            return;
+          }
+          if (data.renamed) {
+            // ファイル名が変わった（fixed_接頭辞の付け外し）。グリッド側の
+            // 既存ロジックと同じく、以後の食い違いを避けるため素直に
+            // ページを再読み込みする（モーダルは再読み込みで自動的に閉じる）。
+            window.location.reload();
+            return;
+          }
+          pinLabel.textContent = data.pinned ? '固定表示中' : '固定表示ではない';
+          var item = document.getElementById('item-' + filename);
+          if (item) {
+            var gridPin = item.querySelector('.pin-cb');
+            if (gridPin) {
+              gridPin.checked = data.pinned;
+            }
+            var gridPinLabel = item.querySelector('.pin-switch-label');
+            if (gridPinLabel) {
+              gridPinLabel.textContent = data.pinned ? '固定表示中' : '固定表示ではない';
+            }
+            var existingBadge = item.querySelector('.pin-badge');
+            if (data.pinned && !existingBadge) {
+              var badge = document.createElement('span');
+              badge.className = 'pin-badge';
+              badge.textContent = '📌固定';
+              item.insertBefore(badge, item.querySelector('.switch-row'));
+            } else if (!data.pinned && existingBadge) {
+              existingBadge.remove();
+            }
+          }
+        })
+        .catch(function () {
+          pinCb.checked = !wasChecked;
+          pinLabel.textContent = '更新に失敗しました';
+        });
+    });
+
+    prioritySelect.addEventListener('change', function () {
+      if (!currentFilename) {
+        return;
+      }
+      var filename = currentFilename;
+      var tag = this.value;
+      var previousTag = this.dataset.currentTag || 'normal';
+      prioritySelect.disabled = true;
+
+      fetch('/priority', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'filename=' + encodeURIComponent(filename) + '&tag=' + encodeURIComponent(tag)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          prioritySelect.disabled = false;
+          if (data.error) {
+            prioritySelect.value = previousTag;
+            return;
+          }
+          prioritySelect.dataset.currentTag = tag;
+
+          var item = document.getElementById('item-' + filename);
+          if (item) {
+            var gridSelect = item.querySelector('.priority-select');
+            if (gridSelect) {
+              gridSelect.value = tag;
+              gridSelect.dataset.currentTag = tag;
+            }
+            var existingBadge = item.querySelector('.priority-badge');
+            if (existingBadge) {
+              existingBadge.remove();
+            }
+            if (tag !== 'normal') {
+              var labels = { priority1: '優先表示1', priority2: '優先表示2', priority3: '優先表示3', priority4: '優先表示4', priority5: '優先表示5' };
+              var badge = document.createElement('span');
+              badge.className = 'priority-badge';
+              badge.textContent = labels[tag] || tag;
+              item.insertBefore(badge, item.querySelector('.switch-row'));
+            }
+          }
+        })
+        .catch(function () {
+          prioritySelect.disabled = false;
+          prioritySelect.value = previousTag;
+        });
+    });
+
+    deleteBtn.addEventListener('click', function () {
+      if (!currentFilename) {
+        return;
+      }
+      var filename = currentFilename;
+      var confirmed = window.confirm(
+        'この写真を削除しますか？\\n' +
+        '「' + filename + '」\\n\\n' +
+        'この操作は取り消せません。'
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      deleteBtn.disabled = true;
+      deleteBtn.textContent = '削除中...';
+
+      fetch('/delete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'filename=' + encodeURIComponent(filename)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.error) {
+            deleteBtn.disabled = false;
+            deleteBtn.textContent = '削除に失敗しました';
+            return;
+          }
+          var item = document.getElementById('item-' + filename);
+          if (item) {
+            item.remove();
+          }
+          closeModal();
+        })
+        .catch(function () {
+          deleteBtn.disabled = false;
+          deleteBtn.textContent = '削除に失敗しました';
+        });
+    });
+  })();
+  </script>
+
+  <script>
   function setupSlider(sliderId, valueId, statusId, fieldName, decimals) {
     var slider = document.getElementById(sliderId);
     var valueLabel = document.getElementById(valueId);
@@ -468,6 +824,10 @@ UPLOAD_PAGE = """
   setupSlider('interval-slider', 'interval-value', 'interval-status', 'image_interval', 0);
   setupSlider('priority-interval-slider', 'priority-interval-value', 'priority-interval-status',
               'priority_interval', 0);
+  setupSlider('prefetch-window-slider', 'prefetch-window-value', 'prefetch-window-status',
+              'image_prefetch_window', 0);
+  setupSlider('max-pinned-slider', 'max-pinned-value', 'max-pinned-status',
+              'max_pinned_images', 0);
 
   function setupSelect(selectId, statusId, fieldName) {
     var select = document.getElementById(selectId);
@@ -756,6 +1116,17 @@ PRIORITY_LABELS = {
 }
 
 
+def render_priority_select_options_plain():
+    """プレビューモーダル用。グリッド側のrender_gallery_item()内のoptions生成と違い、
+    どの画像を開くかは開いた瞬間にJS側が決めるため、あらかじめ選択済み(selected)を
+    決め打ちできない。JSが要素を表示する時に.valueを直接セットする前提の、
+    素のoption一覧だけを返す。"""
+    return "".join(
+        f'<option value="{value}">{label}</option>'
+        for value, label in PRIORITY_LABELS.items()
+    )
+
+
 def render_gallery_item(filename, is_hidden, priority_tag, is_pinned=False):
     state_class = "is-hidden" if is_hidden else ""
     checked_attr = "" if is_hidden else "checked"
@@ -773,7 +1144,7 @@ def render_gallery_item(filename, is_hidden, priority_tag, is_pinned=False):
     pin_badge = '<span class="pin-badge">📌固定</span>' if is_pinned else ""
     return f"""
     <div class="item {state_class}" id="item-{filename}">
-      <img src="/img/{filename}" loading="lazy">
+      <img src="/img/{filename}" loading="lazy" class="item-thumb" data-filename="{filename}">
       {priority_badge}
       {pin_badge}
       <div class="switch-row">
@@ -1166,6 +1537,8 @@ def create_app(image_folder):
             "rotation": DEFAULT_ROTATION,
             "priority_interval": DEFAULT_PRIORITY_INTERVAL,
             "image_fit_mode": DEFAULT_IMAGE_FIT_MODE,
+            "image_prefetch_window": DEFAULT_IMAGE_PREFETCH_WINDOW,
+            "max_pinned_images": DEFAULT_MAX_PINNED_IMAGES,
         })
         transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
         image_interval = int(round(float(settings.get("image_interval", DEFAULT_IMAGE_INTERVAL))))
@@ -1173,6 +1546,10 @@ def create_app(image_folder):
         rotation = int(settings.get("rotation", DEFAULT_ROTATION)) % 360
         priority_interval = int(round(float(settings.get("priority_interval", DEFAULT_PRIORITY_INTERVAL))))
         image_fit_mode = settings.get("image_fit_mode", DEFAULT_IMAGE_FIT_MODE)
+        image_prefetch_window = int(round(float(
+            settings.get("image_prefetch_window", DEFAULT_IMAGE_PREFETCH_WINDOW))))
+        max_pinned_images = int(round(float(
+            settings.get("max_pinned_images", DEFAULT_MAX_PINNED_IMAGES))))
 
         current_conn = wifi_setup.current_connection_info()
         network_mode_labels = {
@@ -1208,6 +1585,8 @@ def create_app(image_folder):
                 .replace("__TRANSITION_TYPE_OPTIONS__", render_transition_type_options(transition_type))
                 .replace("__IMAGE_FIT_MODE_OPTIONS__", render_image_fit_mode_options(image_fit_mode))
                 .replace("__PRIORITY_INTERVAL__", str(priority_interval))
+                .replace("__IMAGE_PREFETCH_WINDOW__", str(image_prefetch_window))
+                .replace("__MAX_PINNED_IMAGES__", str(max_pinned_images))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__CURRENT_VERSION__", __version__)
                 .replace("__HOSTNAME__", socket.gethostname())
@@ -1217,6 +1596,7 @@ def create_app(image_folder):
                 .replace("__EXPORT_KEY_STATUS__", _h(export_key_status))
                 .replace("__EXPORT_KEY_REVOKE_BUTTON__", export_key_revoke_button)
                 .replace("__GALLERY__", gallery_html)
+                .replace("__MODAL_PRIORITY_OPTIONS__", render_priority_select_options_plain())
                 .replace("__VERSION__", __version__))
         return html
 
@@ -1244,6 +1624,20 @@ def create_app(image_folder):
         is_pinned = False
         renamed = False
         if filename:
+            current_pinned = signage_state.load_pinned(image_folder)
+            turning_on = filename not in current_pinned
+            if turning_on:
+                max_pinned = int(round(float(signage_state.load_settings(
+                    image_folder, {"max_pinned_images": DEFAULT_MAX_PINNED_IMAGES}
+                ).get("max_pinned_images", DEFAULT_MAX_PINNED_IMAGES))))
+                if len(current_pinned) >= max_pinned:
+                    return {
+                        "error": f"固定表示は最大{max_pinned}枚までです。"
+                                 "他の画像の固定表示を解除するか、上限枚数を設定で増やしてください",
+                        "limit_reached": True,
+                        "max_pinned_images": max_pinned,
+                    }, 400
+
             pinned_set = signage_state.toggle_pinned(image_folder, filename)
             is_pinned = filename in pinned_set
 
@@ -1339,7 +1733,8 @@ def create_app(image_folder):
         raw = {
             key: request.form.get(key)
             for key in ("transition_duration", "image_interval", "priority_interval",
-                        "transition_type", "image_fit_mode", "setup_ap_ssid", "setup_ap_password")
+                        "transition_type", "image_fit_mode", "setup_ap_ssid", "setup_ap_password",
+                        "image_prefetch_window", "max_pinned_images")
             if key in request.form
         }
         if not raw:
@@ -1359,6 +1754,8 @@ def create_app(image_folder):
             "image_fit_mode": DEFAULT_IMAGE_FIT_MODE,
             "setup_ap_ssid": wifi_setup.default_setup_ssid(WIFI_SETUP_SSID_PREFIX),
             "setup_ap_password": WIFI_SETUP_DEFAULT_PASSWORD,
+            "image_prefetch_window": DEFAULT_IMAGE_PREFETCH_WINDOW,
+            "max_pinned_images": DEFAULT_MAX_PINNED_IMAGES,
         }
         result = signage_state.save_settings(image_folder, updates, defaults=defaults)
 

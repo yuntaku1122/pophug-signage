@@ -126,10 +126,12 @@ try:
     EXPORT_KEY_FILENAME = getattr(_config, "EXPORT_KEY_FILENAME", "pophug-export-key.txt")
     EXPORT_FOLDER_PREFIX = getattr(_config, "EXPORT_FOLDER_PREFIX", "pophug_export_")
     EXPORT_HOLD_SECONDS = getattr(_config, "EXPORT_HOLD_SECONDS", 15)
+    DEFAULT_MAX_PINNED_IMAGES = getattr(_config, "MAX_PINNED_IMAGES", 10)
 except ImportError:
     EXPORT_KEY_FILENAME = "pophug-export-key.txt"
     EXPORT_FOLDER_PREFIX = "pophug_export_"
     EXPORT_HOLD_SECONDS = 15
+    DEFAULT_MAX_PINNED_IMAGES = 10
 
 
 STATE_FILENAMES = (
@@ -264,10 +266,11 @@ def import_images(source_dir, image_folder, ts=None):
         "imported": [...今回新しくコピーしたファイル名...],
         "restored": [...以前取り込み済みで、今回「表示」に戻したファイル名...],
         "pinned": [...新規コピー分のうち固定表示に設定したファイル名...],
+        "pinned_limit_skipped": 上限超過のため固定表示にできなかった枚数（int）,
         "error": エラーメッセージ or None,
     }
     """
-    empty_result = {"imported": [], "restored": [], "pinned": [], "error": None}
+    empty_result = {"imported": [], "restored": [], "pinned": [], "pinned_limit_skipped": 0, "error": None}
 
     if signage_state is None:
         return {**empty_result, "error": "signage_state.pyが見つかりません（インストール先を確認してください）"}
@@ -311,6 +314,9 @@ def import_images(source_dir, image_folder, ts=None):
     imported_hashes = signage_state.load_usb_imported(image_folder)
     hidden = signage_state.load_hidden(image_folder)
     pinned = signage_state.load_pinned(image_folder)
+    max_pinned = int(round(float(signage_state.load_settings(
+        image_folder, {"max_pinned_images": DEFAULT_MAX_PINNED_IMAGES}
+    ).get("max_pinned_images", DEFAULT_MAX_PINNED_IMAGES))))
 
     existing_before = set(
         f for f in os.listdir(image_folder)
@@ -321,6 +327,7 @@ def import_images(source_dir, image_folder, ts=None):
     new_filenames = []
     restored_filenames = []
     new_pinned = []
+    pinned_limit_skipped = 0
     index = 1
 
     for name, full, ext in candidates:
@@ -338,7 +345,15 @@ def import_images(source_dir, image_folder, ts=None):
         # ハッシュ記録はあるが実体が消えている（Web画面で削除された等）場合は、
         # 新規取り込みと同様に扱う（下へフォールスルー）
 
-        is_pinned = name.lower().startswith(FIXED_PREFIX)
+        wants_pinned = name.lower().startswith(FIXED_PREFIX)
+        # 固定表示は常に全件メモリーに常駐する設計のため上限を設けている。
+        # 上限に達している場合、画像自体の取り込みは行うが固定表示にはしない
+        # （取り込み自体を失敗させると、単に上限に達しているだけで写真を
+        # 丸ごと取りこぼすことになり不親切なため）。
+        if wants_pinned and len(pinned) >= max_pinned:
+            wants_pinned = False
+            pinned_limit_skipped += 1
+
         dest_name = f"usb_{ts}_{index:03d}{ext}"
         while os.path.exists(os.path.join(image_folder, dest_name)):
             index += 1
@@ -354,7 +369,7 @@ def import_images(source_dir, image_folder, ts=None):
 
         imported_hashes[h] = dest_name
         new_filenames.append(dest_name)
-        if is_pinned:
+        if wants_pinned:
             new_pinned.append(dest_name)
             pinned.add(dest_name)
 
@@ -376,10 +391,15 @@ def import_images(source_dir, image_folder, ts=None):
     signage_state.save_pinned(image_folder, pinned)
     signage_state.save_usb_imported(image_folder, imported_hashes)
 
+    if pinned_limit_skipped:
+        log(f"固定表示の上限（{max_pinned}枚）に達しているため、{pinned_limit_skipped}枚は"
+            f"通常表示として取り込みました（固定表示にはしていません）")
+
     return {
         "imported": new_filenames,
         "restored": restored_filenames,
         "pinned": new_pinned,
+        "pinned_limit_skipped": pinned_limit_skipped,
         "error": None,
     }
 
@@ -397,6 +417,8 @@ def build_notice_message(result):
         details.append(f"取り込み済みを再表示{len(result['restored'])}枚")
     if result["pinned"]:
         details.append(f"うち固定表示{len(result['pinned'])}枚")
+    if result.get("pinned_limit_skipped"):
+        details.append(f"固定表示の上限により{result['pinned_limit_skipped']}枚は通常表示")
     if details:
         msg += "（" + "・".join(details) + "）"
     msg += "。以前の画像は非表示になりました。USBを取り外してください"
