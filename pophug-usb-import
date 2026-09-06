@@ -53,6 +53,9 @@
 #   pophug-usb-import <デバイス名-add 例: sda1-add>    …挿入時
 #   pophug-usb-import <デバイス名-remove 例: sda1-remove> …取り外し時
 #   pophug-usb-import <デバイス名>                      …後方互換（-add扱い）
+#   pophug-usb-import manual-export                     …Web設定画面(PC接続時)の
+#                                                          「今すぐUSBへ書き出す」ボタンから
+#                                                          sudoers経由で直接呼ばれる特別なモード
 #
 # インストール:
 #   sudo cp pophug-usb-import /usr/local/bin/
@@ -67,9 +70,11 @@
 
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -119,17 +124,15 @@ except ImportError:
     update_check = None  # 未配置の場合はUSBアップデート検出機能だけ無効化する
 
 # config.py（標準ライブラリのみに依存）から、USB書き出し機能の合言葉
-# ファイル名・書き出し先フォルダの接頭辞を再利用する。未配置の環境でも
-# 動作を止めないよう、既定値にフォールバックする。
+# ファイル名を再利用する。未配置の環境でも動作を止めないよう、既定値に
+# フォールバックする。
 try:
     import config as _config
     EXPORT_KEY_FILENAME = getattr(_config, "EXPORT_KEY_FILENAME", "pophug-export-key.txt")
-    EXPORT_FOLDER_PREFIX = getattr(_config, "EXPORT_FOLDER_PREFIX", "pophug_export_")
     EXPORT_HOLD_SECONDS = getattr(_config, "EXPORT_HOLD_SECONDS", 15)
     DEFAULT_MAX_PINNED_IMAGES = getattr(_config, "MAX_PINNED_IMAGES", 10)
 except ImportError:
     EXPORT_KEY_FILENAME = "pophug-export-key.txt"
-    EXPORT_FOLDER_PREFIX = "pophug_export_"
     EXPORT_HOLD_SECONDS = 15
     DEFAULT_MAX_PINNED_IMAGES = 10
 
@@ -644,77 +647,61 @@ def find_and_apply_settings_file(source_dir, image_folder):
 # 無ければ何もしない（通常のUSB取り込み・アップデート検出・設定ファイル
 # 適用だけはこの関数の呼び出しと無関係に、いつも通り実行される）。
 
-def try_export_images(mount_point, image_folder):
-    """待受け中のUSB書き出しを試みる。挿したUSBの直下にEXPORT_KEY_FILENAMEと
-    同名のファイルがあり、内容が発行済みの合言葉と一致した場合だけ、
-    現在image_folderに格納されている画像ファイルを全て、USBメモリー上に
-    日時付きで新しく作るフォルダへコピーする（USB側の既存ファイルには
-    一切触れない。毎回新しいフォルダを作るため上書きの心配が無い）。
+def _build_export_dir_name(mount_point):
+    """書き出し先フォルダ名を「ホスト名_西暦日付」の形式で組み立てる。
+    同じ機体から同じ日に複数回書き出した場合の上書き事故を避けるため、
+    既に同名のフォルダが存在する場合は末尾に_2, _3...と連番を振る。"""
+    hostname = socket.gethostname()
+    date_str = time.strftime("%Y%m%d")
+    base = f"{hostname}_{date_str}"
+    candidate = base
+    n = 2
+    while os.path.exists(os.path.join(mount_point, candidate)):
+        candidate = f"{base}_{n}"
+        n += 1
+    return candidate
 
-    書き出しが実際に行われた場合は待受け状態を消費（クリア）し、以後
-    もう一度ボタンを長押ししない限り書き出しはできないようにする。
-    合言葉が無い・不一致の場合は待受け状態をそのまま残す
-    （USBを挿し直して再挑戦できるように）。
 
-    戻り値: 画面通知用のメッセージ、または合言葉が無い/不一致で
-    書き出しを行わなかった場合はNone。"""
-    try:
-        entries = os.listdir(mount_point)
-    except OSError:
-        return None
+def _copy_all_images_to(mount_point, image_folder):
+    """image_folder内の対応画像を全て、mount_point直下に新規作成する
+    「ホスト名_日付」フォルダへコピーする（USB書き出し機能の中核処理）。
+    USB側書き出し待受け・PC接続時の即時書き出しの両方から共通で呼ばれる。
 
-    matches = [n for n in entries if n.lower() == EXPORT_KEY_FILENAME.lower()]
-    if not matches:
-        log("USB書き出し待受け中ですが、合言葉ファイルが見つからないため書き出しをスキップしました")
-        return None
+    コピー処理は画像の枚数・サイズによっては数十秒以上かかることがあり、その間
+    画面に何の変化も無いと「固まったのでは」と誤解されかねない。進捗を専有画面
+    （シャットダウン中等と同じフルスクリーン通知）で更新する。main.py側は
+    images/.notice.jsonの更新時刻を1秒間隔でポーリングしているため、この
+    途中経過もほぼリアルタイムに反映される（最終的な完了メッセージは、
+    戻り値を呼び出し側が改めて通知することで上書きされる）。
 
-    key_path = os.path.join(mount_point, matches[0])
-    try:
-        with open(key_path, "r", encoding="utf-8", errors="replace") as f:
-            raw_key = f.read().strip()
-    except OSError as e:
-        log(f"合言葉ファイルの読み込みに失敗しました: {e}")
-        return None
+    【v4.37.2の教訓】当初は1枚コピーするごとに毎回save_notice()（内部でfsync）
+    していたが、ext4では小さな通知ファイルへのfsyncであっても、その時点で
+    未確定の他の書き込み（＝進行中の大量の画像コピー分）をまとめてディスクへ
+    書き切らせてしまう。88枚・172MBの実機検証で、この頻発するfsyncがPi Zero 2W
+    の非力なI/Oを詰まらせ、本体側メインループの生存通知が間に合わずに
+    systemdウォッチドッグでSIGKILL→本体再起動、という重大な不具合を引き起こした。
+    対策として、進捗通知はdurable=False（fsyncを省略）で書き込み、かつ更新間隔も
+    0.5秒に間引く（枚数が多くても書き込み回数は増えない）。開始（0枚）・完了
+    （全枚）の通知だけは間引かず必ず出す。
 
-    if not raw_key or not signage_state.verify_export_key(image_folder, raw_key):
-        log("USB書き出し待受け中ですが、合言葉が一致しないため書き出しをスキップしました")
-        return None
-
+    戻り値: (コピー成功数, 失敗ファイル名リスト, 実際に使ったフォルダ名) のタプル。
+    書き出し対象の画像が1枚も無い場合はNoneを返す。"""
     images = sorted(
         f for f in os.listdir(image_folder)
         if os.path.splitext(f)[1].lower() in SUPPORTED_EXT
     )
     if not images:
         log("書き出し対象の画像が1枚も無いため、書き出しを見送りました")
-        signage_state.clear_export_standby(image_folder)
-        return "書き出し対象の画像が1枚もありませんでした"
+        return None
 
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    dest_dir_name = f"{EXPORT_FOLDER_PREFIX}{ts}"
+    dest_dir_name = _build_export_dir_name(mount_point)
     dest_dir = os.path.join(mount_point, dest_dir_name)
     try:
         os.makedirs(dest_dir, exist_ok=False)
     except OSError as e:
         log(f"書き出し先フォルダの作成に失敗しました: {e}")
-        return f"書き出し先フォルダの作成に失敗しました（{e}）"
+        return 0, list(images), dest_dir_name
 
-    # コピー処理は画像の枚数・サイズによっては数十秒以上かかることがあり、その間
-    # 画面に何の変化も無いと「固まったのでは」と誤解されかねない。進捗を専有画面
-    # （シャットダウン中等と同じフルスクリーン通知）で更新する。main.py側は
-    # images/.notice.jsonの更新時刻を1秒間隔でポーリングしているため、この
-    # 途中経過もほぼリアルタイムに反映される（最終的な完了メッセージは、
-    # この関数の戻り値をhandle_add側が改めて通知することで上書きされる）。
-    #
-    # 【v4.37.2の教訓】当初は1枚コピーするごとに毎回save_notice()（内部でfsync）
-    # していたが、ext4では小さな通知ファイルへのfsyncであっても、その時点で
-    # 未確定の他の書き込み（＝進行中の大量の画像コピー分）をまとめてディスクへ
-    # 書き切らせてしまう。88枚・172MBの実機検証で、この頻発するfsyncがPi Zero 2W
-    # の非力なI/Oを詰まらせ、本体側メインループの生存通知が間に合わずに
-    # systemdウォッチドッグでSIGKILL→本体再起動、という重大な不具合を引き起こした。
-    # 対策として、進捗通知はdurable=False（fsyncを省略）で書き込み、かつ更新間隔も
-    # 0.5秒に間引く（枚数が多くても書き込み回数は増えない）。durable=Falseでも
-    # os.replace()自体の原子性（画面表示が中途半端に壊れた内容になることが無い）
-    # は保たれる。開始（0枚）・完了（全枚）の通知だけは間引かず必ず出す。
     total = len(images)
     signage_state.save_notice(
         image_folder, f"USBへ画像を書き出しています…（0/{total}枚）",
@@ -752,17 +739,146 @@ def try_export_images(mount_point, image_folder):
     except OSError:
         pass  # exFAT等、ディレクトリのfsyncに対応していない環境もあるため失敗しても続行する
 
-    # 成功・一部失敗いずれの場合も、この回の待受けは消費する
-    # （合言葉自体は正しかったため、失敗を理由に何度も自動で試させることはしない。
-    # 再度書き出したい場合は改めてボタンを長押ししてもらう）。
-    signage_state.clear_export_standby(image_folder)
-
     if failed:
         log(f"USBへの書き出しが一部失敗しました（成功{copied}枚/失敗{len(failed)}枚）: {dest_dir_name}/")
-        return f"画像{copied}枚をUSBへ書き出しました（{len(failed)}枚失敗、{dest_dir_name}/フォルダ内）"
+    else:
+        log(f"USBへの書き出しが完了しました（{copied}枚 → {dest_dir_name}/）")
 
-    log(f"USBへの書き出しが完了しました（{copied}枚 → {dest_dir_name}/）")
+    return copied, failed, dest_dir_name
+
+
+def _format_export_result_message(result):
+    """_copy_all_images_to()の戻り値を、画面通知用の文言に変換する。"""
+    if result is None:
+        return "書き出し対象の画像が1枚もありませんでした"
+    copied, failed, dest_dir_name = result
+    if failed:
+        return f"画像{copied}枚をUSBへ書き出しました（{len(failed)}枚失敗、{dest_dir_name}/フォルダ内）"
     return f"画像{copied}枚をUSBへ書き出しました（{dest_dir_name}/フォルダ内）"
+
+
+def try_export_images(mount_point, image_folder):
+    """待受け中のUSB書き出しを試みる（本体ボタン長押し＋USB挿入の、PCレス運用向け
+    経路）。挿したUSBの直下にEXPORT_KEY_FILENAMEと同名のファイルがあり、その
+    中にこの機体のホスト名と一致する行が1行でもあれば、現在image_folderに
+    格納されている画像ファイルを全て、USBメモリー上の新しいフォルダへコピーする。
+
+    ここでの「合言葉ファイル」は秘密の値の一致ではなく、単に「このUSBでの
+    書き出しを許可された機体のホスト名一覧」を意味する（機密性を高める必要は
+    無いという前提の設計）。1つのファイルに複数のホスト名を1行ずつ書いて
+    おけば、そのUSB1本を複数のpophug本体に順番に挿すだけで、それぞれの
+    機体から書き出すことができる（マスターUSB運用）。
+
+    書き出しが実際に行われた場合は待受け状態を消費（クリア）し、以後
+    もう一度ボタンを長押ししない限り書き出しはできないようにする。
+    合言葉ファイルが無い・この機体のホスト名が含まれていない場合は待受け状態を
+    そのまま残す（USBを挿し直して再挑戦できるように）。
+
+    戻り値: 画面通知用のメッセージ、または該当ホスト名が無く書き出しを
+    行わなかった場合はNone。"""
+    try:
+        entries = os.listdir(mount_point)
+    except OSError:
+        return None
+
+    matches = [n for n in entries if n.lower() == EXPORT_KEY_FILENAME.lower()]
+    if not matches:
+        log("USB書き出し待受け中ですが、合言葉ファイル（ホスト名一覧）が見つからないため書き出しをスキップしました")
+        return None
+
+    key_path = os.path.join(mount_point, matches[0])
+    try:
+        with open(key_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError as e:
+        log(f"合言葉ファイルの読み込みに失敗しました: {e}")
+        return None
+
+    # 空行・「#」で始まるコメント行は無視する（1行1ホスト名の想定）
+    allowed_hostnames = {
+        line.strip().lower() for line in lines
+        if line.strip() and not line.strip().startswith("#")
+    }
+    hostname = socket.gethostname()
+    if hostname.lower() not in allowed_hostnames:
+        log(f"USB書き出し待受け中ですが、合言葉ファイルにこの機体のホスト名"
+            f"（{hostname}）が見つからないため書き出しをスキップしました")
+        return None
+
+    result = _copy_all_images_to(mount_point, image_folder)
+
+    # 合言葉自体（＝ホスト名の一致）は正しかったので、コピー結果の成功・失敗に
+    # 関わらずこの回の待受けは消費する。再度書き出したい場合は改めて
+    # ボタンを長押ししてもらう。
+    signage_state.clear_export_standby(image_folder)
+
+    return _format_export_result_message(result)
+
+
+def manual_export():
+    """Web設定画面（PCからブラウザでアクセスしている場合）の
+    「今すぐUSBへ書き出す」ボタンから、root権限のヘルパー経由で直接呼ばれる。
+    Web設定画面に入れていること自体を許可の根拠とするため、合言葉ファイルの
+    確認は行わない。本体ボタンの長押し・USBの挿抜タイミングにも依存せず、
+    今現在接続されているUSBメモリーを直接検出して書き込む。
+
+    このスクリプトの他の全ての処理はudevイベント経由でrootとして起動される
+    一方、これだけはsudoers経由でpophugユーザー（Flaskプロセス）から直接
+    呼び出される数少ない経路のため、他の処理（画像取り込み・アップデート
+    検出・設定ファイル適用）は一切行わず、書き出しだけに処理を限定する
+    （PC接続時の操作で意図しない副作用を起こさないため）。
+
+    標準出力に結果を1行のJSON文字列で出力する。呼び出し元
+    （upload_server.py）はこれをパースしてブラウザへ結果を返す。
+    戻り値: プロセスの終了コードとして使う整数（成功0、失敗1）。"""
+    if signage_state is None:
+        print(json.dumps({"ok": False, "error": "signage_state.pyが見つかりません（インストール先を確認してください）"}))
+        return 1
+
+    # 現在接続されているUSBパーティションを検出する（udevルールが対象とする
+    # ものと同じ命名規則: sd[a-z][0-9]）。pophugはSDカード起動のみを想定して
+    # おり、/dev/sd*は原則としてUSBメモリーのみが該当する。
+    try:
+        candidates = sorted(
+            d for d in os.listdir("/dev")
+            if DEVICE_RE.match(d)
+        )
+    except OSError as e:
+        print(json.dumps({"ok": False, "error": f"USBメモリーの検出に失敗しました（{e}）"}))
+        return 1
+
+    if not candidates:
+        print(json.dumps({"ok": False, "error": "USBメモリーが見つかりません。挿してから再度お試しください"}))
+        return 1
+
+    device_name = candidates[0]
+    if len(candidates) > 1:
+        log(f"複数のUSBメモリーが検出されました（{candidates}）。先頭の{device_name}のみを対象とします")
+
+    device_path = f"/dev/{device_name}"
+    ok, err = mount_device(device_path, read_write=True)
+    if not ok:
+        print(json.dumps({"ok": False, "error": f"USBメモリーのマウントに失敗しました（{err}）"}))
+        return 1
+
+    try:
+        result = _copy_all_images_to(MOUNT_POINT, IMAGE_FOLDER)
+    finally:
+        unmount()
+        fix_ownership(IMAGE_FOLDER)
+
+    if result is None:
+        print(json.dumps({"ok": False, "error": "書き出し対象の画像が1枚もありませんでした"}))
+        return 1
+
+    copied, failed, dest_dir_name = result
+    print(json.dumps({
+        "ok": True,
+        "copied": copied,
+        "failed": len(failed),
+        "folder": dest_dir_name,
+    }))
+    return 0
 
 
 def parse_arg(arg):
@@ -778,7 +894,20 @@ def parse_arg(arg):
 
 def main():
     if len(sys.argv) != 2:
-        sys.exit("usage: pophug-usb-import <device-event e.g. sda1-add / sda1-remove>")
+        sys.exit("usage: pophug-usb-import <device-event e.g. sda1-add / sda1-remove> | manual-export")
+
+    # manual-exportは、udevイベント経由ではなくWeb設定画面（PCからのアクセス時）の
+    # ボタンから、sudoers経由で直接呼ばれる特別なモード。他の処理とは完全に
+    # 独立させ、専用のロック区間の中で実行する（USBの挿抜イベントと同時に
+    # 実行された場合の競合を避けるため、同じLOCK_PATHを使う）。
+    if sys.argv[1] == "manual-export":
+        lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            sys.exit(manual_export())
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
     device_name, event = parse_arg(sys.argv[1])
 
@@ -856,12 +985,12 @@ def handle_add(device_name):
     if key_file_present and not export_message:
         if want_export:
             export_hint_message = (
-                "合言葉ファイルを検出しましたが、内容が発行済みのものと一致しないため、"
-                "書き出しは行われませんでした。設定画面で合言葉ファイルを発行し直して"
-                "USBメモリーに置き直してください")
+                f"合言葉ファイル（ホスト名一覧）を検出しましたが、この機体のホスト名"
+                f"（{socket.gethostname()}）が見つからないため、書き出しは行われませんでした。"
+                "ファイルにこの機体のホスト名を1行追加してください")
         else:
             export_hint_message = (
-                "合言葉ファイルを検出しましたが、USB書き出し待受け中ではないため、"
+                "合言葉ファイル（ホスト名一覧）を検出しましたが、USB書き出し待受け中ではないため、"
                 f"書き出しは行われませんでした。本体ボタンを{EXPORT_HOLD_SECONDS}秒以上"
                 "長押ししてから、あらためてこのUSBメモリーを挿してください")
 

@@ -19,9 +19,9 @@
 #     外部Wi-Fiが無い出店先でもiPhoneがPiに直接つながる
 # ============================================
 
+import json
 import os
 import re
-import secrets
 import socket
 import subprocess
 import threading
@@ -1016,44 +1016,70 @@ UPLOAD_PAGE = """
   <div class="box" style="margin-top:16px;">
     <h1>USB書き出し機能</h1>
     <p class="hint" style="margin:0 0 12px;">
-      本体ボタンを__EXPORT_HOLD_SECONDS__秒以上長押しすると「書き出し待受けモード」に入ります。
-      待受け中に、ここで発行した合言葉ファイルが入ったUSBメモリーを挿すと、
-      現在格納されている画像を全てそのUSBへ書き出せます（PCレスで実行可能）。
+      現在格納されている画像を全て、USBメモリーへまとめて書き出せます（取り込みとは逆方向）。
+      書き出し先には「ホスト名_日付」のフォルダが新しく作られます（例: __HOSTNAME___20260906）。
     </p>
-    <p class="hint" id="export-key-status" style="margin:0 0 12px;">現在の状態: __EXPORT_KEY_STATUS__</p>
-    <form id="export-key-generate-form" method="POST" action="/export-key/generate" style="display:inline;"></form>
-    <button type="button" id="export-key-generate-btn">新しい合言葉ファイルを発行してダウンロード</button>
-    __EXPORT_KEY_REVOKE_BUTTON__
-    <p class="setting-status" id="export-key-status-msg"></p>
+
+    <h2 style="font-size:15px; margin:16px 0 8px;">PCから操作している場合</h2>
+    <p class="hint" style="margin:0 0 12px;">
+      本体にUSBメモリーを挿した状態で、下のボタンを押すだけで今すぐ書き出せます
+      （このWeb設定画面を開けていること自体を、操作してよい人だという前提にしています）。
+    </p>
+    <button type="button" id="export-now-btn">今すぐUSBへ書き出す</button>
+    <p class="setting-status" id="export-now-status"></p>
+
+    <h2 style="font-size:15px; margin:20px 0 8px;">PCレスで運用している場合（本体ボタンのみ）</h2>
+    <p class="hint" style="margin:0 0 12px;">
+      ① USBメモリーの一番上の階層に、「pophug-export-key.txt」という名前のテキストファイルを置き、
+      中にこの機体のホスト名（<strong>__HOSTNAME__</strong>）を1行書いておく。
+      1つのファイルに複数の機体のホスト名を1行ずつ書いておけば、同じUSB1本を複数台のpophugに
+      順番に挿すだけで、それぞれから書き出せます（秘密の合言葉ではないため、機体名を
+      そのまま書くだけで構いません）。<br>
+      ② 本体ボタンを__EXPORT_HOLD_SECONDS__秒以上長押しすると「書き出し待受けモード」に入ります。<br>
+      ③ そのUSBメモリーを挿すと、書き出しが行われます。
+    </p>
+    <button type="button" id="download-hostname-btn">この機体のホスト名を書いたテキストファイルをダウンロード</button>
+    <p class="hint" style="margin:8px 0 0;">
+      ダウンロードした「pophug-export-key.txt」をそのままUSBメモリーの一番上の階層に置いてください
+      （複数台ぶん集めたい場合は、テキストエディタで他の機体のホスト名を追記できます）。
+    </p>
   </div>
 
   <script>
   (function () {
-    var generateBtn = document.getElementById('export-key-generate-btn');
-    generateBtn.addEventListener('click', function () {
-      var confirmed = window.confirm(
-        '新しく発行すると、以前発行した合言葉ファイルは使えなくなります。\\n' +
-        'よろしいですか？'
-      );
-      if (!confirmed) {
-        return;
-      }
-      document.getElementById('export-key-generate-form').submit();
+    var exportNowBtn = document.getElementById('export-now-btn');
+    var exportNowStatus = document.getElementById('export-now-status');
+    exportNowBtn.addEventListener('click', function () {
+      exportNowBtn.disabled = true;
+      exportNowStatus.textContent = '書き出し中…（画像の枚数によっては数十秒かかることがあります）';
+
+      fetch('/export-now', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' }
+      })
+        .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+        .then(function (result) {
+          exportNowBtn.disabled = false;
+          var data = result.data || {};
+          if (!result.ok || !data.ok) {
+            exportNowStatus.textContent = data.error || '書き出しに失敗しました';
+            return;
+          }
+          var msg = '画像' + data.copied + '枚をUSBへ書き出しました（' + data.folder + '/フォルダ内）';
+          if (data.failed) {
+            msg += '　※' + data.failed + '枚は失敗しました';
+          }
+          exportNowStatus.textContent = msg;
+        })
+        .catch(function () {
+          exportNowBtn.disabled = false;
+          exportNowStatus.textContent = '通信に失敗しました';
+        });
     });
 
-    var revokeBtn = document.getElementById('export-key-revoke-btn');
-    if (revokeBtn) {
-      revokeBtn.addEventListener('click', function () {
-        var confirmed = window.confirm(
-          '書き出し用キーを無効化しますか？\\n' +
-          '以後、発行済みのUSBメモリーでは書き出しできなくなります。'
-        );
-        if (!confirmed) {
-          return;
-        }
-        document.getElementById('export-key-revoke-form').submit();
-      });
-    }
+    document.getElementById('download-hostname-btn').addEventListener('click', function () {
+      window.location.href = '/export-hostname-file';
+    });
   })();
   </script>
 
@@ -1559,22 +1585,6 @@ def create_app(image_folder):
         }
         network_mode_label = network_mode_labels.get(wifi_setup.current_network_mode(), "不明")
 
-        export_key_info = signage_state.load_export_key_info(image_folder)
-        if export_key_info:
-            created_at = export_key_info.get("created_at")
-            created_label = (datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
-                              if created_at else "不明な日時")
-            export_key_status = f"発行済み（{created_label}発行）"
-            export_key_revoke_button = (
-                '<form id="export-key-revoke-form" method="POST" '
-                'action="/export-key/revoke" style="display:inline;"></form>'
-                '<button type="button" id="export-key-revoke-btn" '
-                'style="margin-top:8px; background:#777;">キーを無効化する</button>'
-            )
-        else:
-            export_key_status = "未発行"
-            export_key_revoke_button = ""
-
         html = (UPLOAD_PAGE
                 .replace("__MESSAGE__", message)
                 .replace("__COUNT__", str(len(files)))
@@ -1593,8 +1603,6 @@ def create_app(image_folder):
                 .replace("__UPDATE_HISTORY_HTML__", render_update_history(update_check.read_history()))
                 .replace("__NETWORK_MODE_LABEL__", network_mode_label)
                 .replace("__EXPORT_HOLD_SECONDS__", str(EXPORT_HOLD_SECONDS))
-                .replace("__EXPORT_KEY_STATUS__", _h(export_key_status))
-                .replace("__EXPORT_KEY_REVOKE_BUTTON__", export_key_revoke_button)
                 .replace("__GALLERY__", gallery_html)
                 .replace("__MODAL_PRIORITY_OPTIONS__", render_priority_select_options_plain())
                 .replace("__VERSION__", __version__))
@@ -1936,26 +1944,55 @@ def create_app(image_folder):
         print(f"[wifi] 保存済みWi-Fi情報の削除に失敗: {error_message}")
         return {"status": "error", "error": error_message}, 500
 
-    @app.route("/export-key/generate", methods=["POST"])
-    def export_key_generate():
-        # USB書き出し機能の合言葉を新規発行する。生の値はこの応答（ダウンロード
-        # されるテキストファイル）にしか含まれず、本体側にはSHA256ハッシュだけを
-        # 保存する（signage_state.save_export_key）。以前発行した合言葉は
-        # この時点で上書きされ、以後使えなくなる。
-        raw_key = secrets.token_hex(16)
-        signage_state.save_export_key(image_folder, raw_key)
-        print("[export-key] 新しい書き出し用キーを発行しました")
-
-        body = raw_key + "\n"
+    @app.route("/export-hostname-file", methods=["GET"])
+    def export_hostname_file():
+        # PCレス運用向けの合言葉ファイル作成を補助するダウンロード。
+        # 「合言葉」は秘密の値ではなく単にこの機体のホスト名そのものなので、
+        # 状態を保存する必要は無く、呼ばれるたびに現在のホスト名をそのまま返すだけでよい
+        # （複数台ぶんまとめたい場合は、テキストエディタで他の機体のホスト名を
+        # 追記してもらう想定）。
+        body = socket.gethostname() + "\n"
         resp = Response(body, mimetype="text/plain; charset=utf-8")
         resp.headers["Content-Disposition"] = f"attachment; filename={EXPORT_KEY_FILENAME}"
         return resp
 
-    @app.route("/export-key/revoke", methods=["POST"])
-    def export_key_revoke():
-        signage_state.clear_export_key(image_folder)
-        print("[export-key] 書き出し用キーを無効化しました")
-        return redirect("/")
+    @app.route("/export-now", methods=["POST"])
+    def export_now():
+        # PCからブラウザでアクセスしている場合向けの即時書き出し。Web設定画面に
+        # 入れていること自体を許可の根拠とするため、合言葉ファイルの確認は行わない。
+        # 本体ボタンの長押し・USB挿抜のタイミングにも依存せず、今現在接続されている
+        # USBメモリーを直接検出して書き込む（root権限が必要な実処理は、専用の
+        # 限定ヘルパー経由で行う。sudoersでこのサブコマンド単体だけを許可している）。
+        try:
+            proc = subprocess.run(
+                ["sudo", "/usr/local/bin/pophug-usb-import", "manual-export"],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "書き出し処理がタイムアウトしました"}, 504
+        except OSError as e:
+            return {"ok": False, "error": f"書き出し処理の起動に失敗しました（{e}）"}, 500
+
+        # 標準出力の最終行だけがJSON形式の結果（それより前の行は、進捗ログ等の
+        # 通常のログメッセージが混ざっていることがあるため、最終行だけを見る）。
+        lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+        if not lines:
+            error_detail = (proc.stderr or "").strip() or "不明なエラー"
+            print(f"[export-now] 出力が空でした（終了コード{proc.returncode}）: {error_detail}")
+            return {"ok": False, "error": "書き出し処理からの応答がありませんでした"}, 500
+
+        try:
+            result = json.loads(lines[-1])
+        except ValueError:
+            print(f"[export-now] 結果の解析に失敗しました: {lines[-1]}")
+            return {"ok": False, "error": "書き出し結果の解析に失敗しました"}, 500
+
+        if result.get("ok"):
+            print(f"[export-now] 書き出し完了: {result}")
+            return result, 200
+
+        print(f"[export-now] 書き出し失敗: {result}")
+        return result, 400
 
     @app.route("/shutdown", methods=["POST"])
     def shutdown():

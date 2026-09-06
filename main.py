@@ -19,7 +19,7 @@ from signage_state import (load_hidden, hidden_mtime, load_settings, settings_mt
                             load_priority, PRIORITY_TAGS, load_notice, notice_mtime,
                             load_pinned, save_hidden, network_recheck_mtime,
                             load_usb_update_pending, usb_update_pending_mtime,
-                            clear_usb_update_pending, load_export_key_info,
+                            clear_usb_update_pending,
                             save_export_standby, load_export_standby,
                             clear_export_standby, export_standby_mtime)
 from version import __version__
@@ -790,18 +790,13 @@ class PopSignage:
 
     def _enter_export_standby(self):
         """ボタンの最長長押しで、USB書き出し待受けモードに入る。
-        書き出し用の合言葉キーがまだ発行されていない場合は、待受けに入らず
-        エラー通知だけを出す（先にWeb設定画面で発行してもらう必要があるため）。
         待受け中は images/.export_standby.json に期限付きで記録し、root権限で
         動くpophug-usb-import（別プロセス）が、USBメモリー挿入時にこれを見て
-        書き出しを試みるかどうかを判断する。"""
+        書き出しを試みるかどうかを判断する（挿したUSBに、この機体のホスト名が
+        書かれた合言葉ファイルがあるかどうかで実際に書き出すかが決まる。
+        本体側では事前にキーを発行しておく必要は無い＝ここでは常に待受けに
+        入れる）。"""
         if self.export_standby_active:
-            return
-
-        key_info = load_export_key_info(IMAGE_FOLDER)
-        if not key_info:
-            log("USB書き出し待受けが要求されましたが、書き出し用キーが未発行のため中止しました")
-            self._show_notice("USB書き出し用のキーが未発行です。設定画面（スマホ）から発行してください")
             return
 
         expires_at = time.time() + EXPORT_STANDBY_TIMEOUT_SECONDS

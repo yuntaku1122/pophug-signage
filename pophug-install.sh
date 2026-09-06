@@ -183,6 +183,13 @@ sudo chmod 440 /etc/sudoers.d/pophug-netctl
 echo "pophug ALL=(ALL) NOPASSWD: /usr/local/bin/pophug-update-apply *" | sudo tee /etc/sudoers.d/pophug-update-apply > /dev/null
 sudo chmod 440 /etc/sudoers.d/pophug-update-apply
 
+# USB書き出し機能の「PCから今すぐ書き出す」ボタン（Web設定画面）専用。
+# 引数を固定文字列（manual-export）だけに絞り、ワイルドカードは使わない
+# （他のヘルパーと違い、この一機能にしか使わない単一の呼び出しのため、
+# 可能な限り許可範囲を狭くしている）。
+echo "pophug ALL=(ALL) NOPASSWD: /usr/local/bin/pophug-usb-import manual-export" | sudo tee /etc/sudoers.d/pophug-usb-import-manual-export > /dev/null
+sudo chmod 440 /etc/sudoers.d/pophug-usb-import-manual-export
+
 sudo visudo -c
 echo "  sudoers設定OK（visudo -c で構文確認済み）"
 echo "  ※ upload_server.pyのSHUTDOWN_COMMANDが上記のシャットダウンパスと"

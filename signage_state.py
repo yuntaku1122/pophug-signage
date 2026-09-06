@@ -6,7 +6,6 @@
 # 定期的にこのファイルを読み直し、非表示にした画像を除外する。
 # ============================================
 
-import hashlib
 import json
 import os
 import shutil
@@ -579,73 +578,6 @@ def usb_update_pending_mtime(image_folder):
         return os.path.getmtime(path)
     except OSError:
         return None
-
-
-# ---------------- USB書き出し機能：合言葉キーの管理 ----------------
-# 「今格納されている画像を全部USBメモリーへ書き出したい」という要望に対応する
-# 機能で使う、書き出し実行を許可するための合言葉（キー）を管理する。
-# Web設定画面（スマホ・PCどちらでも操作可）で発行し、生の値はダウンロード
-# 応答（USBに置くテキストファイル）にしか含まれない。本体側
-# (images/.export_key.json)にはSHA256ハッシュ値だけを保存する。
-
-def _export_key_path(image_folder):
-    return os.path.join(image_folder, ".export_key.json")
-
-
-def save_export_key(image_folder, raw_key):
-    """新しい合言葉を発行する。以前発行した合言葉は上書きされ、以後使えなくなる。"""
-    data = {
-        "key_hash": hashlib.sha256(raw_key.strip().encode("utf-8")).hexdigest(),
-        "created_at": time.time(),
-    }
-    with _lock:
-        _atomic_write_json(_export_key_path(image_folder), data)
-
-
-def load_export_key_info(image_folder):
-    """発行済みキーの情報（{"created_at": ...}、ハッシュ値は含まない）を返す。
-    Web設定画面での「発行済み/未発行」表示用。未発行、または読み込みに
-    失敗した場合はNoneを返す。"""
-    path = _export_key_path(image_folder)
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict) or "key_hash" not in data:
-            return None
-        return {"created_at": data.get("created_at")}
-    except Exception:
-        return None
-
-
-def verify_export_key(image_folder, raw_key):
-    """指定された生の合言葉が、発行済みキーと一致するか確認する。
-    未発行の場合や、値が空の場合は常にFalseを返す。"""
-    if not raw_key:
-        return False
-    path = _export_key_path(image_folder)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        stored_hash = data.get("key_hash")
-    except Exception:
-        return False
-    if not stored_hash:
-        return False
-    return hashlib.sha256(raw_key.strip().encode("utf-8")).hexdigest() == stored_hash
-
-
-def clear_export_key(image_folder):
-    """発行済みキーを無効化する（Web設定画面の「キーを無効化する」用）。
-    以後、以前発行したUSBメモリーでは書き出しができなくなる。"""
-    path = _export_key_path(image_folder)
-    with _lock:
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
 
 
 # ---------------- USB書き出し機能：待受け状態（ボタン長押しでアーム） ----------------
