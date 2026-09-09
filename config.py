@@ -118,6 +118,22 @@ STANDALONE_CHECK_INTERVAL = 120      # その後の再判定間隔（秒）※�
 SHUTDOWN_COMMAND = ["sudo", "/sbin/shutdown", "-h", "now"]
 SHUTDOWN_HOLD_SECONDS = 10           # QRボタンをこの秒数以上長押しするとシャットダウンする
 
+# root権限が必要な機能一覧（sudoers設定の健全性チェック用）
+# 【2026-09の運用フィードバックから追加】root権限が必要な新機能を追加した際、
+# コード自体はOTA/USBアップデートで既存機にも配信されるが、対応するsudoers設定
+# （/etc/sudoers.d/配下）はpophug-install.sh実行時にしか追加されない。この
+# ズレに気付かないまま運用してしまう（＝ボタンを押した瞬間に初めて失敗に気付く）
+# ことを防ぐため、Web設定画面の起動時にsudo -n -l（非対話・許可有無の確認のみ、
+# パスワード入力は発生しない）で実際に許可されているかを毎回確認し、不足していれば
+# 警告バナーを表示する。各項目は (画面表示用ラベル, sudo -l で確認するコマンド引数列) の組。
+# 新しくroot権限が必要な機能を追加する際は、ここにも追記しておくこと。
+REQUIRED_SUDO_CAPABILITIES = [
+    ("ラズパイのシャットダウン", ["/sbin/shutdown", "-h", "now"]),
+    ("Wi-Fi設定の変更", ["/usr/local/bin/pophug-netctl", "status"]),
+    ("アップデートの適用", ["/usr/local/bin/pophug-update-apply", "--help"]),
+    ("USB書き出し機能（PCから今すぐ書き出す）", ["/usr/local/bin/pophug-usb-import", "manual-export"]),
+]
+
 # USB書き出し（吸い出し）機能設定
 # 「今格納されている画像を全部USBメモリーに書き出したい」という要望への対応。
 # 2通りの起動経路がある：

@@ -125,6 +125,11 @@ try:
 except ImportError:
     EXPORT_HOLD_SECONDS = 15
 
+try:
+    from config import REQUIRED_SUDO_CAPABILITIES
+except ImportError:
+    REQUIRED_SUDO_CAPABILITIES = []
+
 import update_check
 
 try:
@@ -211,9 +216,16 @@ UPLOAD_PAGE = """
   .update-changelog { font-size:13px; color:#333; white-space:pre-wrap; background:#f5f5f0;
                        border-radius:8px; padding:12px; margin:10px 0; }
   .btn-secondary { background:#555 !important; }
+  .sudo-warning-box { border:2px solid #c0392b; background:#fff5f5; margin-bottom:16px; }
+  .sudo-warning-box h1 { color:#c0392b; margin:0 0 8px; font-size:17px; }
+  .sudo-warning-box ul { margin:8px 0 12px; padding-left:20px; font-size:14px; color:#333; }
+  .sudo-warning-box code { background:#fff; border:1px solid #eee; border-radius:6px;
+                             padding:10px; display:block; font-size:13px; white-space:pre;
+                             overflow-x:auto; margin-top:6px; }
 </style>
 </head>
 <body>
+  __SUDO_WARNING_HTML__
   <div class="box">
     <h1>POP画像アップロード</h1>
     __MESSAGE__
@@ -1025,8 +1037,8 @@ UPLOAD_PAGE = """
       本体にUSBメモリーを挿した状態で、下のボタンを押すだけで今すぐ書き出せます
       （このWeb設定画面を開けていること自体を、操作してよい人だという前提にしています）。
     </p>
-    <button type="button" id="export-now-btn">今すぐUSBへ書き出す</button>
-    <p class="setting-status" id="export-now-status"></p>
+    <button type="button" id="export-now-btn" __EXPORT_NOW_DISABLED_ATTR__>今すぐUSBへ書き出す</button>
+    <p class="setting-status" id="export-now-status">__EXPORT_NOW_DISABLED_NOTE__</p>
 
     <h2 style="font-size:15px; margin:20px 0 8px;">PCレスで運用している場合（本体ボタンのみ）</h2>
     <p class="hint" style="margin:0 0 12px;">
@@ -1209,6 +1221,67 @@ def render_image_fit_mode_options(current):
         selected = " selected" if value == current else ""
         opts.append(f'<option value="{value}"{selected}>{label}</option>')
     return "".join(opts)
+
+
+def check_sudo_capability(command_args):
+    """指定したコマンド（引数込み）を、このプロセスのユーザー（pophug）が
+    パスワード無しでsudo実行できる状態か確認する。
+
+    /etc/sudoers.d/配下のファイルはroot以外読めない（0440 root:root）ため、
+    ファイルの中身を直接見て判定することはできない。代わりに、sudo自身の
+    `-l <command>`（そのコマンドが許可されているか照会するモード）に
+    `-n`（非対話。パスワードが必要な場合は問い合わせずに即座に失敗する）を
+    組み合わせて呼び出し、終了コードだけで判定する（実際にはコマンドを
+    実行しない、照会のみの安全な呼び出し）。"""
+    try:
+        proc = subprocess.run(
+            ["sudo", "-n", "-l"] + list(command_args),
+            capture_output=True, text=True, timeout=5,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def check_missing_sudo_capabilities():
+    """REQUIRED_SUDO_CAPABILITIES（config.py）のうち、実際には許可されていない
+    ものだけを、画面表示用ラベルのリストとして返す。全て許可されていれば
+    空リストを返す。
+
+    【2026-09の運用フィードバックから追加】root権限が必要な新機能を追加した際、
+    コード自体はOTA/USBアップデートで既存機にも配信されるが、対応するsudoers
+    設定はpophug-install.sh実行時にしか追加されない。このズレに気付かないまま
+    運用してしまう（＝ボタンを押した瞬間に初めて失敗に気付く）ことを防ぐため、
+    Web設定画面を開くたびにここで確認し、不足があれば警告バナーを表示する。"""
+    missing = []
+    for label, cmd in REQUIRED_SUDO_CAPABILITIES:
+        if not check_sudo_capability(cmd):
+            missing.append(label)
+    return missing
+
+
+def render_sudo_warning(missing_labels):
+    """不足しているsudo権限があれば、画面上部に出す赤枠の警告バナーのHTMLを
+    組み立てる。何も不足していなければ空文字列を返す（バナー自体を表示しない）。
+    修正手順は常に同じ1コマンド（pophug-install.shの再実行）に統一している
+    （個別のsudoersコマンドを何行も提示すると、打ち間違い・手順の抜けが
+    起きやすいため）。"""
+    if not missing_labels:
+        return ""
+    items = "".join(f"<li>{_h(label)}</li>" for label in missing_labels)
+    return f"""
+  <div class="box sudo-warning-box">
+    <h1>⚠ セットアップの確認が必要です</h1>
+    <p>以下の機能に必要な権限設定が確認できませんでした（アップデート後、
+       初回のみ必要になることがあります）：</p>
+    <ul>{items}</ul>
+    <p>SSHで本体に接続し、以下を1回だけ実行してください（安全に何度でも
+       再実行できます。既に個別化済みの機体では再起動・データ消去は
+       発生しません）：</p>
+    <code>cd /home/pophug/pophug-signage
+bash pophug-install.sh</code>
+  </div>
+"""
 
 
 def render_update_history(history):
@@ -1585,7 +1658,19 @@ def create_app(image_folder):
         }
         network_mode_label = network_mode_labels.get(wifi_setup.current_network_mode(), "不明")
 
+        missing_sudo_labels = check_missing_sudo_capabilities()
+        sudo_warning_html = render_sudo_warning(missing_sudo_labels)
+        export_now_disabled = "USB書き出し機能（PCから今すぐ書き出す）" in missing_sudo_labels
+        export_now_disabled_attr = "disabled" if export_now_disabled else ""
+        export_now_disabled_note = (
+            "⚠ 権限設定が未確認のため無効になっています（画面上部の案内を確認してください）"
+            if export_now_disabled else ""
+        )
+
         html = (UPLOAD_PAGE
+                .replace("__SUDO_WARNING_HTML__", sudo_warning_html)
+                .replace("__EXPORT_NOW_DISABLED_ATTR__", export_now_disabled_attr)
+                .replace("__EXPORT_NOW_DISABLED_NOTE__", export_now_disabled_note)
                 .replace("__MESSAGE__", message)
                 .replace("__COUNT__", str(len(files)))
                 .replace("__VISIBLE_COUNT__", str(visible_count))
