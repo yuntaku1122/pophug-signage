@@ -331,6 +331,65 @@ class PopSignage:
             ordered.extend(priority)
         return ordered
 
+    @staticmethod
+    def _interleave_pinned_blocks(pinned_list, normal_ordered, pinned_block_size, normal_block_size):
+        """固定表示画像をpinned_block_size枚、通常画像（優先表示込みで既に並び順が
+        確定したもの）をnormal_block_size枚、交互にひとまとまりずつ並べた表示順を
+        作る（例: 固定3枚+通常4枚なら A,B,C,1,2,3,4,D,E,F,5,6,7,8,...）。
+
+        固定表示・通常表示それぞれを独立したカーソルで進め、末尾まで来たら
+        先頭へ循環させる。呼ばれるたびに位置0から作り直す都合上、両方の
+        カーソルがちょうど同時に位置0へ戻るブロック数（最小公倍数）ぶんを
+        まとめて1周分として生成し、そのまま何度再生してもズレが出ないように
+        している（そうしないと、ordered_filesの末尾からmain.py側で
+        インデックスが0へ折り返した瞬間に、本来の続きとは違う位置から
+        再開してしまう）。
+
+        ordered_filesはSurfaceの実体ではなくファイル名の文字列だけを持つ
+        軽量なリストなので（実際のデコード済み画像は別途pinned_cache/
+        window_cacheで管理している）、この周期がある程度長くなってもメモリー・
+        CPU面の負荷は無視できるほど小さい。念のため上限
+        （_MAX_INTERLEAVE_LENGTH）を設け、極端な組み合わせで周期が膨らみ
+        すぎる場合は、綺麗な周期にはこだわらず打ち切る（境目で多少パターンが
+        飛ぶことはあるが、次の再スキャンでordered_filesごと作り直されるため
+        実用上は気付かれにくい）。"""
+        if pinned_block_size <= 0 or not pinned_list or normal_block_size <= 0:
+            return normal_ordered
+        if not normal_ordered:
+            # 通常画像が無いなら固定表示だけを単純に1周分返す
+            return list(pinned_list)
+
+        def _gcd(a, b):
+            while b:
+                a, b = b, a % b
+            return a
+
+        def _lcm(a, b):
+            return a * b // _gcd(a, b)
+
+        p_len = len(pinned_list)
+        n_len = len(normal_ordered)
+        # 各カーソルがちょうど位置0に戻るまでに必要なブロック数
+        n_p = p_len // _gcd(p_len, pinned_block_size)
+        n_n = n_len // _gcd(n_len, normal_block_size)
+        blocks = _lcm(n_p, n_n)
+
+        _MAX_INTERLEAVE_LENGTH = 4000  # 生成する表示順リストの長さの安全上限
+        block_len = pinned_block_size + normal_block_size
+        if blocks * block_len > _MAX_INTERLEAVE_LENGTH:
+            blocks = max(1, _MAX_INTERLEAVE_LENGTH // block_len)
+
+        result = []
+        p_idx = n_idx = 0
+        for _ in range(blocks):
+            for _ in range(pinned_block_size):
+                result.append(pinned_list[p_idx % p_len])
+                p_idx += 1
+            for _ in range(normal_block_size):
+                result.append(normal_ordered[n_idx % n_len])
+                n_idx += 1
+        return result
+
     def load_pop_images(self, initial=False):
         """images/ フォルダを読み込み、新しい画像や優先表示設定の変更があれば反映する。
         アップロードサーバーから随時追加される画像を検知するため定期的に呼ばれる。
@@ -354,27 +413,52 @@ class PopSignage:
         mtimes = {f: os.path.getmtime(os.path.join(IMAGE_FOLDER, f)) for f in files}
 
         priority_map = load_priority(IMAGE_FOLDER)
-        settings = load_settings(IMAGE_FOLDER, {"priority_interval": PRIORITY_INTERVAL})
+        settings = load_settings(IMAGE_FOLDER, {
+            "priority_interval": PRIORITY_INTERVAL,
+            "pinned_block_size": PINNED_BLOCK_SIZE,
+            "normal_block_size": NORMAL_BLOCK_SIZE,
+        })
         try:
             interval = int(settings.get("priority_interval", PRIORITY_INTERVAL))
         except (TypeError, ValueError):
             interval = PRIORITY_INTERVAL
+        try:
+            pinned_block_size = int(settings.get("pinned_block_size", PINNED_BLOCK_SIZE))
+        except (TypeError, ValueError):
+            pinned_block_size = PINNED_BLOCK_SIZE
+        try:
+            normal_block_size = int(settings.get("normal_block_size", NORMAL_BLOCK_SIZE))
+        except (TypeError, ValueError):
+            normal_block_size = NORMAL_BLOCK_SIZE
 
         pinned = load_pinned(IMAGE_FOLDER) & set(files)
 
         # 変化検知: ファイルの追加/削除/更新だけでなく、優先表示タグ・割り込み間隔・
-        # 固定表示状態の変更でも表示順序や常駐キャッシュの再構築が必要なため、
-        # それらもキーに含める
+        # 固定表示状態・ブロック表示設定の変更でも表示順序や常駐キャッシュの
+        # 再構築が必要なため、それらもキーに含める
         state_key = (
             tuple(sorted(mtimes.items())),
             tuple(sorted((k, v) for k, v in priority_map.items() if k in mtimes)),
             interval,
             tuple(sorted(pinned)),
+            pinned_block_size,
+            normal_block_size,
         )
         if state_key == self._image_state_key:
             return  # 変化なし
 
-        ordered_files = self._build_ordered_files(files, priority_map, interval)
+        if pinned_block_size > 0 and pinned:
+            # ブロック表示モード: 固定表示は通常のローテーションから除外し、
+            # 独立したブロックとして交互に挿入する（優先表示は「通常画像」の
+            # パート内でこれまで通り割り込み表示される＝両機能は併用できる）
+            files_for_rotation = [f for f in files if f not in pinned]
+            ordered_normal = self._build_ordered_files(files_for_rotation, priority_map, interval)
+            pinned_ordered_list = sorted(pinned)
+            ordered_files = self._interleave_pinned_blocks(
+                pinned_ordered_list, ordered_normal, pinned_block_size, normal_block_size)
+        else:
+            # 従来通り: 固定表示は通常画像の並び（ファイル名順）に混在したまま
+            ordered_files = self._build_ordered_files(files, priority_map, interval)
 
         new_pinned_cache = {}
         for f in pinned:

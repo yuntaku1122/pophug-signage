@@ -73,6 +73,16 @@ except ImportError:
     DEFAULT_MAX_PINNED_IMAGES = 10
 
 try:
+    from config import PINNED_BLOCK_SIZE as DEFAULT_PINNED_BLOCK_SIZE
+except ImportError:
+    DEFAULT_PINNED_BLOCK_SIZE = 0
+
+try:
+    from config import NORMAL_BLOCK_SIZE as DEFAULT_NORMAL_BLOCK_SIZE
+except ImportError:
+    DEFAULT_NORMAL_BLOCK_SIZE = 4
+
+try:
     from config import WIFI_SETUP_SSID_PREFIX, WIFI_SETUP_DEFAULT_PASSWORD
 except ImportError:
     WIFI_SETUP_SSID_PREFIX = "pophug-setup"
@@ -341,6 +351,36 @@ UPLOAD_PAGE = """
         上限を超えて新たに固定表示にすることはできません（既存の固定表示はそのまま残ります。
         減らしたい場合はWeb画面から手動で解除してください）。</p>
       <p class="setting-status" id="max-pinned-status"></p>
+    </div>
+  </div>
+
+  <div class="box" style="margin-top:16px;">
+    <h1>固定表示のブロック表示パターン</h1>
+    <p class="hint" style="margin:0 0 12px;">
+      既定では、固定表示（📌）の画像は通常の写真の並び（ファイル名順）に混在したまま
+      表示されます。ここで両方の枚数を指定すると、「固定表示をN枚まとめて→通常画像を
+      M枚まとめて→また固定表示N枚→…」という、ブロック単位の交互表示に切り替わります。
+      例）固定表示A〜H・通常表示1〜9で、固定枚数3・通常枚数4に設定した場合：<br>
+      A,B,C,1,2,3,4,D,E,F,5,6,7,8,G,H,A,9,1,2,3,B,C,D,4,5,6,7,…<br>
+      （固定表示・通常表示それぞれ独立して順番に進み、最後まで来たら先頭に戻ります。
+      優先表示を設定している場合は、この「通常画像」の中で従来通り割り込み表示されます）
+    </p>
+    <div class="setting-row">
+      <label>1ブロックあたりの固定表示枚数
+        <span id="pinned-block-value">__PINNED_BLOCK_SIZE__</span>枚</label>
+      <input type="range" id="pinned-block-slider" min="0" max="20" step="1"
+             value="__PINNED_BLOCK_SIZE__">
+      <p class="hint" style="margin:4px 0 0;">0にするとブロック表示は無効になり、
+        従来通り固定表示は通常画像に混在します。</p>
+      <p class="setting-status" id="pinned-block-status"></p>
+    </div>
+    <div class="setting-row">
+      <label>1ブロックあたりの通常表示枚数
+        <span id="normal-block-value">__NORMAL_BLOCK_SIZE__</span>枚</label>
+      <input type="range" id="normal-block-slider" min="1" max="50" step="1"
+             value="__NORMAL_BLOCK_SIZE__">
+      <p class="hint" style="margin:4px 0 0;">上の固定表示枚数が0の間は使われません。</p>
+      <p class="setting-status" id="normal-block-status"></p>
     </div>
   </div>
 
@@ -840,6 +880,10 @@ UPLOAD_PAGE = """
               'image_prefetch_window', 0);
   setupSlider('max-pinned-slider', 'max-pinned-value', 'max-pinned-status',
               'max_pinned_images', 0);
+  setupSlider('pinned-block-slider', 'pinned-block-value', 'pinned-block-status',
+              'pinned_block_size', 0);
+  setupSlider('normal-block-slider', 'normal-block-value', 'normal-block-status',
+              'normal_block_size', 0);
 
   function setupSelect(selectId, statusId, fieldName) {
     var select = document.getElementById(selectId);
@@ -1638,6 +1682,8 @@ def create_app(image_folder):
             "image_fit_mode": DEFAULT_IMAGE_FIT_MODE,
             "image_prefetch_window": DEFAULT_IMAGE_PREFETCH_WINDOW,
             "max_pinned_images": DEFAULT_MAX_PINNED_IMAGES,
+            "pinned_block_size": DEFAULT_PINNED_BLOCK_SIZE,
+            "normal_block_size": DEFAULT_NORMAL_BLOCK_SIZE,
         })
         transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
         image_interval = int(round(float(settings.get("image_interval", DEFAULT_IMAGE_INTERVAL))))
@@ -1649,6 +1695,10 @@ def create_app(image_folder):
             settings.get("image_prefetch_window", DEFAULT_IMAGE_PREFETCH_WINDOW))))
         max_pinned_images = int(round(float(
             settings.get("max_pinned_images", DEFAULT_MAX_PINNED_IMAGES))))
+        pinned_block_size = int(round(float(
+            settings.get("pinned_block_size", DEFAULT_PINNED_BLOCK_SIZE))))
+        normal_block_size = int(round(float(
+            settings.get("normal_block_size", DEFAULT_NORMAL_BLOCK_SIZE))))
 
         current_conn = wifi_setup.current_connection_info()
         network_mode_labels = {
@@ -1682,6 +1732,8 @@ def create_app(image_folder):
                 .replace("__PRIORITY_INTERVAL__", str(priority_interval))
                 .replace("__IMAGE_PREFETCH_WINDOW__", str(image_prefetch_window))
                 .replace("__MAX_PINNED_IMAGES__", str(max_pinned_images))
+                .replace("__PINNED_BLOCK_SIZE__", str(pinned_block_size))
+                .replace("__NORMAL_BLOCK_SIZE__", str(normal_block_size))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__CURRENT_VERSION__", __version__)
                 .replace("__HOSTNAME__", socket.gethostname())
@@ -1827,7 +1879,8 @@ def create_app(image_folder):
             key: request.form.get(key)
             for key in ("transition_duration", "image_interval", "priority_interval",
                         "transition_type", "image_fit_mode", "setup_ap_ssid", "setup_ap_password",
-                        "image_prefetch_window", "max_pinned_images")
+                        "image_prefetch_window", "max_pinned_images",
+                        "pinned_block_size", "normal_block_size")
             if key in request.form
         }
         if not raw:
@@ -1849,6 +1902,8 @@ def create_app(image_folder):
             "setup_ap_password": WIFI_SETUP_DEFAULT_PASSWORD,
             "image_prefetch_window": DEFAULT_IMAGE_PREFETCH_WINDOW,
             "max_pinned_images": DEFAULT_MAX_PINNED_IMAGES,
+            "pinned_block_size": DEFAULT_PINNED_BLOCK_SIZE,
+            "normal_block_size": DEFAULT_NORMAL_BLOCK_SIZE,
         }
         result = signage_state.save_settings(image_folder, updates, defaults=defaults)
 

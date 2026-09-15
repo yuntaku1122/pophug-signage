@@ -317,6 +317,20 @@ def validate_settings_updates(raw_values):
         except (TypeError, ValueError):
             errors.append(("max_pinned_images", "数値ではありません（1〜20の範囲で指定してください）"))
 
+    if "pinned_block_size" in raw_values:
+        try:
+            v = max(0, min(int(float(raw_values["pinned_block_size"])), 20))
+            valid["pinned_block_size"] = v
+        except (TypeError, ValueError):
+            errors.append(("pinned_block_size", "数値ではありません（0〜20の範囲で指定してください。0で無効）"))
+
+    if "normal_block_size" in raw_values:
+        try:
+            v = max(1, min(int(float(raw_values["normal_block_size"])), 50))
+            valid["normal_block_size"] = v
+        except (TypeError, ValueError):
+            errors.append(("normal_block_size", "数値ではありません（1〜50の範囲で指定してください）"))
+
     if "transition_type" in raw_values:
         v = str(raw_values["transition_type"]).strip()
         if v in VALID_TRANSITION_TYPES:
