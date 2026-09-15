@@ -111,6 +111,11 @@ except ImportError:
     SHUTDOWN_COMMAND = ["sudo", "/sbin/shutdown", "-h", "now"]
 
 try:
+    from config import REBOOT_COMMAND
+except ImportError:
+    REBOOT_COMMAND = ["sudo", "/sbin/shutdown", "-r", "now"]
+
+try:
     from config import ROTATE_SCREEN as DEFAULT_ROTATION
 except ImportError:
     DEFAULT_ROTATION = 0
@@ -1141,9 +1146,48 @@ UPLOAD_PAGE = """
 
   <div class="box danger-box" style="margin-top:16px;">
     <h1>システム</h1>
-    <button type="button" id="shutdown-btn">ラズパイをシャットダウン</button>
+    <button type="button" id="reboot-btn">ラズパイを再起動</button>
+    <p class="setting-status" id="reboot-status"></p>
+    <button type="button" id="shutdown-btn" style="margin-top:10px;">ラズパイをシャットダウン</button>
     <p class="setting-status" id="shutdown-status"></p>
   </div>
+
+  <script>
+  (function () {
+    var btn = document.getElementById('reboot-btn');
+    var status = document.getElementById('reboot-status');
+
+    btn.addEventListener('click', function () {
+      var confirmed = window.confirm(
+        '本当にラズパイを再起動しますか？\\n' +
+        '再起動が完了するまで、サイネージもこのアップロードページも使えなくなります。'
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      btn.disabled = true;
+      status.textContent = '再起動しています…';
+
+      fetch('/reboot', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: 'confirm=yes'
+      })
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          status.textContent = '数十秒後に再起動します。しばらくしたらこのページを再読み込みしてください。';
+        })
+        .catch(function () {
+          status.textContent = '再起動の開始に失敗しました。';
+          btn.disabled = false;
+        });
+    });
+  })();
+  </script>
 
   <script>
   (function () {
@@ -2133,6 +2177,43 @@ def create_app(image_folder):
 
         print(f"[export-now] 書き出し失敗: {result}")
         return result, 400
+
+    @app.route("/reboot", methods=["POST"])
+    def reboot():
+        # クライアント側のconfirm()ダイアログに加え、サーバー側でも
+        # confirm=yesが明示的に送られてきた場合のみ実行する二重の安全策
+        # （/shutdownと同じ考え方。コマンドだけが -r now に変わる）
+        if request.form.get("confirm") != "yes":
+            return {"error": "confirmation required"}, 400
+
+        print(f"[reboot] 要求を受け付けました。実行コマンド: {' '.join(REBOOT_COMMAND)}")
+
+        def do_reboot():
+            time.sleep(1)  # レスポンスをブラウザに返してから実行する
+            try:
+                result = subprocess.run(
+                    REBOOT_COMMAND, check=True, capture_output=True, text=True, timeout=15
+                )
+                print(f"[reboot] コマンド実行成功 (returncode={result.returncode})")
+                if result.stdout:
+                    print(f"[reboot] stdout: {result.stdout.strip()}")
+                if result.stderr:
+                    print(f"[reboot] stderr: {result.stderr.strip()}")
+            except subprocess.CalledProcessError as e:
+                print(f"[reboot] コマンドが失敗しました (returncode={e.returncode})")
+                print(f"[reboot] stdout: {e.stdout}")
+                print(f"[reboot] stderr: {e.stderr}")
+            except subprocess.TimeoutExpired:
+                print("[reboot] コマンドがタイムアウトしました（sudoがパスワード入力待ちで固まっている可能性があります）")
+            except Exception as e:
+                print(f"[reboot] 予期しないエラー: {e}")
+
+        threading.Thread(target=do_reboot, daemon=True).start()
+
+        if request.headers.get("Accept") == "application/json":
+            return {"status": "rebooting"}, 200
+
+        return redirect("/")
 
     @app.route("/shutdown", methods=["POST"])
     def shutdown():

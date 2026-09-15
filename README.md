@@ -564,20 +564,35 @@ bash pophug-install.sh
 `config.py`の`STANDALONE_AUTO_ENABLED`で機能自体のオン/オフ、`STANDALONE_CHECK_INTERVAL`
 （再判定間隔）・`STANDALONE_BOOT_GRACE_SECONDS`（起動直後の猶予）で挙動を調整できる。
 
-## シャットダウンボタン
+## シャットダウン・再起動ボタン
 
-アップロードページ下部の「システム」から、確認ダイアログを経てラズパイをシャットダウンできる。
-Flaskサーバーは一般ユーザー(`pophug`)権限で動いているため、事前に**シャットダウンコマンドだけを
+アップロードページ下部の「システム」から、確認ダイアログを経てラズパイをシャットダウン・
+再起動できる。Flaskサーバーは一般ユーザー(`pophug`)権限で動いているため、事前に**各コマンドだけを
 パスワード無しで実行できるよう**限定的に許可しておく必要がある。
 
 ```bash
 which shutdown   # 表示されたパスを次のコマンドで使う（多くは /sbin/shutdown）
 echo "pophug ALL=(ALL) NOPASSWD: /sbin/shutdown -h now" | sudo tee /etc/sudoers.d/pophug-shutdown
 sudo chmod 440 /etc/sudoers.d/pophug-shutdown
+echo "pophug ALL=(ALL) NOPASSWD: /sbin/shutdown -r now" | sudo tee /etc/sudoers.d/pophug-reboot
+sudo chmod 440 /etc/sudoers.d/pophug-reboot
 sudo visudo -c    # "parsed OK" と出れば設定完了
 ```
 
-`upload_server.py`の`SHUTDOWN_COMMAND`と、上記sudoersのパスは必ず一致させること。
+`upload_server.py`の`SHUTDOWN_COMMAND`・`REBOOT_COMMAND`と、上記sudoersのパスは必ず一致させること。
+
+v4.40.1以降、この2つを含むroot権限が必要な機能はWeb設定画面が自動でセルフチェックしている
+（詳細は後述の「root権限が必要な機能のセルフチェック」）。既存機で再起動ボタンだけが
+無効化されている場合、上記のsudoers設定がまだ入っていない可能性が高い。新規セットアップ
+済みの機体（`pophug-install.sh`実行時に自動設定）であれば、通常はこの手作業は不要。
+
+### アップデートとの違い
+
+Web設定画面の「アップデートする」ボタンは、**Raspberry Pi本体を再起動するわけではない**。
+新しいファイルへの入れ替え後、`pophug-signage.service`（サイネージ本体のプロセス）だけを
+`systemctl restart`で再起動して新しいコードを反映する設計になっている（詳細は後述の
+「アップデート機能」）。OS自体の再起動が必要な場面（カーネル更新後の反映、Wi-Fi周りの
+不調のリセット等）でだけ、この「ラズパイを再起動」ボタンを使う。
 
 ## Wi-Fiセットアップモード（モニター/キーボード不要でのWi-Fi設定）
 
@@ -805,7 +820,7 @@ python3 main.py --version
 
 | バージョン | 内容 |
 |---|---|
-| 4.41.0 | 【新機能】固定表示画像の表示パターンを「通常画像との混在」から「ブロック単位の交互表示」に切り替え可能に（既定は従来通り無効）。固定表示・通常表示それぞれ独立したカーソルで進み、指定枚数ごとにまとまって交互表示される（例: 固定3枚→通常4枚→固定3枚→…）。優先表示機能とも併用可能。Web設定画面・USB設定ファイルから設定可能 |
+| 4.42.0 | 【新機能】Web設定画面の「システム」欄に「ラズパイを再起動」ボタンを追加（シャットダウンボタンとは独立、二重の確認あり）。対応するsudoersルール（pophug-reboot）をpophug-install.shに新設し、v4.40.1のセルフチェック対象にも追加。あわせて、Web経由のアップデートはPi本体ではなくpophug-signage.serviceのみを再起動する設計であることをREADMEに明記 |
 | 4.41.0 | 【新機能】固定表示画像の表示パターンを、通常画像との混在から「ブロック単位の交互表示」に切り替え可能に。固定表示・通常表示それぞれの枚数を指定すると、「固定表示をN枚まとめて→通常画像をM枚まとめて→…」という順序になる（両者は独立したカーソルで循環し、優先表示とも併用可）。既定は無効（従来通り混在）、Web設定画面・USB設定ファイルから変更可能 |
 | 4.40.1 | 【運用改善】root権限が必要な機能（シャットダウン・Wi-Fi設定・アップデート適用・USB書き出しの「今すぐ書き出す」）について、対応するsudoers設定が実際に有効かをWeb設定画面が自動セルフチェックするようにした。不足があれば警告バナーを表示しボタンを無効化。対処コマンドは「cd /home/pophug/pophug-signage && bash pophug-install.sh」の1つに統一（個別のsudoersコマンド手打ちは廃止） |
 | 4.40.0 | 【設計変更】USB書き出し機能の合言葉方式を刷新（ランダム秘密鍵→この機体のホスト名。複数ホスト名を書けるマスターUSB運用に対応）。書き出し先フォルダ名を「ホスト名_西暦日付」に変更。PCからブラウザでアクセスしている場合向けに「今すぐUSBへ書き出す」ボタンを新設（合言葉不要）。既存機は手動でのsudoers追加が必要（README参照） |

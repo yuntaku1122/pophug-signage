@@ -177,6 +177,9 @@ SHUTDOWN_PATH="$(command -v shutdown)"
 echo "pophug ALL=(ALL) NOPASSWD: $SHUTDOWN_PATH -h now" | sudo tee /etc/sudoers.d/pophug-shutdown > /dev/null
 sudo chmod 440 /etc/sudoers.d/pophug-shutdown
 
+echo "pophug ALL=(ALL) NOPASSWD: $SHUTDOWN_PATH -r now" | sudo tee /etc/sudoers.d/pophug-reboot > /dev/null
+sudo chmod 440 /etc/sudoers.d/pophug-reboot
+
 echo "pophug ALL=(ALL) NOPASSWD: /usr/local/bin/pophug-netctl *" | sudo tee /etc/sudoers.d/pophug-netctl > /dev/null
 sudo chmod 440 /etc/sudoers.d/pophug-netctl
 
@@ -192,8 +195,8 @@ sudo chmod 440 /etc/sudoers.d/pophug-usb-import-manual-export
 
 sudo visudo -c
 echo "  sudoers設定OK（visudo -c で構文確認済み）"
-echo "  ※ upload_server.pyのSHUTDOWN_COMMANDが上記のシャットダウンパスと"
-echo "    一致しているか、念のため確認しておくこと（$SHUTDOWN_PATH）"
+echo "  ※ upload_server.pyのSHUTDOWN_COMMAND・REBOOT_COMMANDが上記のシャットダウン"
+echo "    パスと一致しているか、念のため確認しておくこと（$SHUTDOWN_PATH）"
 
 echo ""
 echo "--- 5/10: systemdユニットの配置 ---"

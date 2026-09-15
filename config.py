@@ -125,10 +125,12 @@ STANDALONE_AUTO_ENABLED = True       # 自動判定を有効にするか
 STANDALONE_BOOT_GRACE_SECONDS = 20   # 起動直後、既知のWi-Fiへの接続を試す猶予時間（秒）
 STANDALONE_CHECK_INTERVAL = 120      # その後の再判定間隔（秒）※接続が途中で切れた場合の検知用
 
-# シャットダウン設定
-# pophugユーザーがパスワード無しで実行できるよう /etc/sudoers.d/pophug-shutdown で
+# シャットダウン・再起動設定
+# pophugユーザーがパスワード無しで実行できるよう、それぞれ
+# /etc/sudoers.d/pophug-shutdown・/etc/sudoers.d/pophug-reboot で
 # 個別に許可しておく必要がある（README参照）。
 SHUTDOWN_COMMAND = ["sudo", "/sbin/shutdown", "-h", "now"]
+REBOOT_COMMAND = ["sudo", "/sbin/shutdown", "-r", "now"]
 SHUTDOWN_HOLD_SECONDS = 10           # QRボタンをこの秒数以上長押しするとシャットダウンする
 
 # root権限が必要な機能一覧（sudoers設定の健全性チェック用）
@@ -142,6 +144,7 @@ SHUTDOWN_HOLD_SECONDS = 10           # QRボタンをこの秒数以上長押し
 # 新しくroot権限が必要な機能を追加する際は、ここにも追記しておくこと。
 REQUIRED_SUDO_CAPABILITIES = [
     ("ラズパイのシャットダウン", ["/sbin/shutdown", "-h", "now"]),
+    ("ラズパイの再起動", ["/sbin/shutdown", "-r", "now"]),
     ("Wi-Fi設定の変更", ["/usr/local/bin/pophug-netctl", "status"]),
     ("アップデートの適用", ["/usr/local/bin/pophug-update-apply", "--help"]),
     ("USB書き出し機能（PCから今すぐ書き出す）", ["/usr/local/bin/pophug-usb-import", "manual-export"]),
