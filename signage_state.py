@@ -8,10 +8,16 @@
 
 import json
 import os
+import secrets
 import shutil
 import tempfile
 import threading
 import time
+
+try:
+    from config import CALL_DISPLAY_DEFAULT_DURATION
+except ImportError:
+    CALL_DISPLAY_DEFAULT_DURATION = 15
 
 _lock = threading.Lock()
 
@@ -331,32 +337,6 @@ def validate_settings_updates(raw_values):
         except (TypeError, ValueError):
             errors.append(("normal_block_size", "数値ではありません（1〜50の範囲で指定してください）"))
 
-    for role in ("customer", "kitchen"):
-        image_key = f"call_{role}_image"
-        if image_key in raw_values:
-            v = str(raw_values[image_key]).strip()
-            # 空文字（未設定に戻す）は許可する。パス区切り文字が含まれる値は
-            # images/フォルダ外を指すことは無いはずだが、念のため拒否する
-            if v and ("/" in v or "\\" in v or ".." in v):
-                errors.append((image_key, "不正なファイル名です"))
-            else:
-                valid[image_key] = v
-
-        key_key = f"call_{role}_key"
-        if key_key in raw_values:
-            try:
-                v = max(0, min(int(float(raw_values[key_key])), 2_000_000_000))
-                valid[key_key] = v
-            except (TypeError, ValueError):
-                errors.append((key_key, "数値ではありません（0で未設定）"))
-
-        duration_key = f"call_{role}_duration"
-        if duration_key in raw_values:
-            try:
-                v = max(1, min(int(float(raw_values[duration_key])), 120))
-                valid[duration_key] = v
-            except (TypeError, ValueError):
-                errors.append((duration_key, "数値ではありません（1〜120の範囲で指定してください）"))
 
     if "transition_type" in raw_values:
         v = str(raw_values["transition_type"]).strip()
@@ -713,3 +693,154 @@ def load_last_detected_key(image_folder):
         return data
     except Exception:
         return None
+
+# ---------------- 呼び出し表示機能：ボタン一覧の管理（v4.44.0〜） ----------------
+# 当初は「客席用」「キッチン用」の固定2枠だったが、「ドリンクメニュー用」
+# 「フードメニュー用」のように用途ごとにボタンを増やしたいという要望を受け、
+# 任意の名前・任意の個数のボタンを管理できる可変長リスト方式に変更した。
+# 各ボタンは {"id", "label", "image", "key", "duration"} の辞書で、
+# images/.call_buttons.json に配列として保存する。
+
+def _call_buttons_path(image_folder):
+    return os.path.join(image_folder, ".call_buttons.json")
+
+
+def _migrate_legacy_call_settings(image_folder):
+    """v4.43.x以前の固定2枠（call_customer_*/call_kitchen_*、.settings.json内）
+    から、新しいボタン一覧方式への移行を1回だけ行う。既にimages/.call_buttons.json
+    が存在する場合は何もしない（初回だけ、既存の設定内容を引き継ぐため）。
+    こうしておくことで、v4.43.xまでの間にWeb画面で設定済みだった客席用・
+    キッチン用の画像・キー・秒数が消えずに新方式へそのまま移行される。"""
+    if os.path.exists(_call_buttons_path(image_folder)):
+        return None
+
+    settings = load_settings(image_folder, {})
+    buttons = []
+    for role, label in (("customer", "客席用"), ("kitchen", "キッチン用")):
+        image = settings.get(f"call_{role}_image")
+        key = settings.get(f"call_{role}_key")
+        duration = settings.get(f"call_{role}_duration")
+        if not (image or key):
+            continue  # 一度も設定されていなかった枠は引き継がない
+        buttons.append({
+            "id": f"legacy_{role}",
+            "label": label,
+            "image": str(image or ""),
+            "key": int(key or 0),
+            "duration": int(duration or 15),
+        })
+    if buttons:
+        save_call_buttons(image_folder, buttons)
+    return buttons
+
+
+def load_call_buttons(image_folder):
+    """呼び出し表示ボタンの一覧を返す（[{"id","label","image","key","duration"}, ...]）。
+    ファイルが無い場合は、v4.43.x以前の設定からの移行を試みたうえで返す
+    （移行対象も無ければ空リスト）。"""
+    path = _call_buttons_path(image_folder)
+    if not os.path.exists(path):
+        migrated = _migrate_legacy_call_settings(image_folder)
+        return migrated or []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        return [b for b in data if isinstance(b, dict) and "id" in b]
+    except Exception:
+        return []
+
+
+def save_call_buttons(image_folder, buttons):
+    with _lock:
+        _atomic_write_json(_call_buttons_path(image_folder), buttons)
+
+
+def add_call_button(image_folder, label):
+    """新しい呼び出し表示ボタンを1つ追加する（画像・キー未設定の状態で作成され、
+    Web画面から個別に設定していく）。作成したボタンのidを返す。
+
+    idはミリ秒タイムスタンプ+短いランダム文字列で生成する。タイムスタンプだけだと
+    短時間に連続して追加された場合に衝突しうる（実際に自動テストで再現した）ため、
+    ランダム要素を必ず加えている。"""
+    label = str(label or "").strip()[:50] or "新しいボタン"
+    buttons = load_call_buttons(image_folder)
+    existing_ids = {b.get("id") for b in buttons}
+    new_id = None
+    for _ in range(10):
+        candidate = f"btn{int(time.time() * 1000)}{secrets.token_hex(3)}"
+        if candidate not in existing_ids:
+            new_id = candidate
+            break
+    if new_id is None:
+        new_id = f"btn{int(time.time() * 1000)}{secrets.token_hex(6)}"  # 最終手段（まず起こらない）
+    buttons.append({"id": new_id, "label": label, "image": "", "key": 0,
+                     "duration": CALL_DISPLAY_DEFAULT_DURATION})
+    save_call_buttons(image_folder, buttons)
+    return new_id
+
+
+def remove_call_button(image_folder, button_id):
+    buttons = load_call_buttons(image_folder)
+    new_buttons = [b for b in buttons if b.get("id") != button_id]
+    if len(new_buttons) == len(buttons):
+        return False  # 該当ボタンが見つからなかった
+    save_call_buttons(image_folder, new_buttons)
+    return True
+
+
+def update_call_button(image_folder, button_id, **fields):
+    """指定したボタンのフィールド（label/image/key/duration）を部分更新する。
+    値の妥当性チェックはvalidate_call_button_update()で事前に行っておくこと。
+    該当ボタンが見つからなければFalseを返す。"""
+    buttons = load_call_buttons(image_folder)
+    found = False
+    for b in buttons:
+        if b.get("id") == button_id:
+            b.update(fields)
+            found = True
+            break
+    if not found:
+        return False
+    save_call_buttons(image_folder, buttons)
+    return True
+
+
+def validate_call_button_update(raw_values):
+    """呼び出し表示ボタンの更新値（label/image/key/duration）を検証する。
+    signage_state.validate_settings_updates()と同じ考え方（範囲外は丸め込み、
+    型が違うものだけエラーにする）を、ボタン一覧用に切り出したもの。
+    戻り値: (妥当な値だけを含むdict, [(フィールド名, 理由), ...])。"""
+    valid = {}
+    errors = []
+
+    if "label" in raw_values:
+        v = str(raw_values["label"]).strip()[:50]
+        if not v:
+            errors.append(("label", "名前を空にすることはできません"))
+        else:
+            valid["label"] = v
+
+    if "image" in raw_values:
+        v = str(raw_values["image"]).strip()
+        if v and ("/" in v or "\\" in v or ".." in v):
+            errors.append(("image", "不正なファイル名です"))
+        else:
+            valid["image"] = v
+
+    if "key" in raw_values:
+        try:
+            v = max(0, min(int(float(raw_values["key"])), 2_000_000_000))
+            valid["key"] = v
+        except (TypeError, ValueError):
+            errors.append(("key", "数値ではありません（0で未設定）"))
+
+    if "duration" in raw_values:
+        try:
+            v = max(1, min(int(float(raw_values["duration"])), 120))
+            valid["duration"] = v
+        except (TypeError, ValueError):
+            errors.append(("duration", "数値ではありません（1〜120の範囲で指定してください）"))
+
+    return valid, errors

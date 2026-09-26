@@ -421,126 +421,60 @@ UPLOAD_PAGE = """
     <h1>呼び出し表示（客席用・キッチン用ボタン）</h1>
     <p class="hint" style="margin:0 0 12px;">
       レジ横に置いたボタンを押すと、指定した画像を指定した秒数だけ全画面表示し、
-      終わると自動的に通常のスライドショーへ戻ります（例: メニュー一覧をお客様の
-      合図で表示、厨房から「お待たせしました」を表示）。ボタンは、USBポートに
-      挿すだけで使えるUSB HID（キーボードエミュレーション）式の押しボタンスイッチを
-      想定しています。ドライバは不要ですが、どのキーを送ってくるかは製品によって
-      異なるため、下の「最後に検出されたキー」を見ながら割り当ててください。
+      終わると自動的に通常のスライドショーへ戻ります（例: ドリンクメニュー・フード
+      メニューをお客様の合図で表示、厨房から「お待たせしました」を表示）。ボタンは
+      いくつでも追加でき、それぞれに別々の画像・秒数・キーを割り当てられます。
+      ボタンは、USBポートに挿すだけで使えるUSB HID（キーボードエミュレーション）式の
+      押しボタンスイッチを想定しています。ドライバは不要ですが、どのキーを送って
+      くるかは製品によって異なるため、下の「最後に検出されたキー」を見ながら
+      割り当ててください。
     </p>
 
     <div class="setting-row" style="background:#f5f5f0; border-radius:8px; padding:12px;">
       <label style="margin:0;">最後に検出されたキー:
         <strong id="last-key-label">まだありません</strong></label>
       <p class="hint" style="margin:6px 0 0;">
-        割り当てたいボタンを一度押してから、以下のどちらかに割り当ててください
+        割り当てたいボタンを一度押してから、下の各ボタンにある
+        「検出したキーを割り当てる」で割り当ててください
         （割り当て済みのキーが押された場合はここには表示されません）。
       </p>
-      <div style="margin-top:8px;">
-        <button type="button" id="assign-last-key-customer-btn" disabled>これを客席用ボタンに設定</button>
-        <button type="button" id="assign-last-key-kitchen-btn" disabled>これをキッチン用ボタンに設定</button>
-      </div>
-      <p class="setting-status" id="assign-last-key-status"></p>
     </div>
 
-    <h2 style="font-size:15px; margin:18px 0 8px;">客席用ボタン</h2>
-    <div class="setting-row">
-      <label>表示する画像</label>
-      <input type="hidden" id="call-customer-image-value" value="__CALL_CUSTOMER_IMAGE__">
-      <div class="call-image-preview" id="call-customer-image-preview"></div>
-      <button type="button" id="call-customer-image-pick-btn">画像を選ぶ</button>
-      <p class="hint" style="margin:6px 0 0;">
-        割り当て済みのキー: <strong id="call-customer-key-label">__CALL_CUSTOMER_KEY_LABEL__</strong>
-      </p>
-      <label style="margin-top:10px; display:block;">表示する秒数
-        <span id="call-customer-duration-value">__CALL_CUSTOMER_DURATION__</span>秒</label>
-      <input type="range" id="call-customer-duration-slider" min="1" max="120" step="1"
-             value="__CALL_CUSTOMER_DURATION__">
-      <p class="setting-status" id="call-customer-status"></p>
-    </div>
+    <div id="call-buttons-list">__CALL_BUTTONS_HTML__</div>
 
-    <h2 style="font-size:15px; margin:18px 0 8px;">キッチン用ボタン</h2>
     <div class="setting-row">
-      <label>表示する画像</label>
-      <input type="hidden" id="call-kitchen-image-value" value="__CALL_KITCHEN_IMAGE__">
-      <div class="call-image-preview" id="call-kitchen-image-preview"></div>
-      <button type="button" id="call-kitchen-image-pick-btn">画像を選ぶ</button>
-      <p class="hint" style="margin:6px 0 0;">
-        割り当て済みのキー: <strong id="call-kitchen-key-label">__CALL_KITCHEN_KEY_LABEL__</strong>
-      </p>
-      <label style="margin-top:10px; display:block;">表示する秒数
-        <span id="call-kitchen-duration-value">__CALL_KITCHEN_DURATION__</span>秒</label>
-      <input type="range" id="call-kitchen-duration-slider" min="1" max="120" step="1"
-             value="__CALL_KITCHEN_DURATION__">
-      <p class="setting-status" id="call-kitchen-status"></p>
+      <button type="button" id="call-button-add-btn">+ 新しいボタンを追加</button>
+      <p class="setting-status" id="call-button-add-status"></p>
     </div>
   </div>
 
   <script>
   (function () {
     var lastKeyLabel = document.getElementById('last-key-label');
-    var customerBtn = document.getElementById('assign-last-key-customer-btn');
-    var kitchenBtn = document.getElementById('assign-last-key-kitchen-btn');
-    var assignStatus = document.getElementById('assign-last-key-status');
     var lastKeyCode = null;
+    var buttonsList = document.getElementById('call-buttons-list');
 
     function refreshLastKey() {
       fetch('/last-detected-key', { headers: { 'Accept': 'application/json' } })
         .then(function (r) { return r.json(); })
         .then(function (data) {
+          var assignBtns = buttonsList.querySelectorAll('.call-btn-assign-key-btn');
           if (data && data.key_code) {
             lastKeyCode = data.key_code;
             lastKeyLabel.textContent = data.key_name + '（コード: ' + data.key_code + '）';
-            customerBtn.disabled = false;
-            kitchenBtn.disabled = false;
+            assignBtns.forEach(function (b) { b.disabled = false; });
           } else {
             lastKeyCode = null;
             lastKeyLabel.textContent = 'まだありません';
-            customerBtn.disabled = true;
-            kitchenBtn.disabled = true;
+            assignBtns.forEach(function (b) { b.disabled = true; });
           }
         })
         .catch(function () {});
     }
 
-    function assignKey(role, btn) {
-      if (!lastKeyCode) {
-        return;
-      }
-      var field = 'call_' + role + '_key';
-      var data = {};
-      data[field] = lastKeyCode;
-      btn.disabled = true;
-      assignStatus.textContent = '割り当てています…';
-      fetch('/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-        body: field + '=' + encodeURIComponent(lastKeyCode)
-      })
-        .then(function (r) { return r.json(); })
-        .then(function () {
-          assignStatus.textContent = '割り当てました。ページを再読み込みすると反映が確認できます。';
-          var label = document.getElementById('call-' + role + '-key-label');
-          if (label) {
-            label.textContent = lastKeyCode;
-          }
-        })
-        .catch(function () {
-          assignStatus.textContent = '割り当てに失敗しました。';
-        })
-        .finally(function () {
-          btn.disabled = false;
-        });
-    }
-
-    customerBtn.addEventListener('click', function () { assignKey('customer', customerBtn); });
-    kitchenBtn.addEventListener('click', function () { assignKey('kitchen', kitchenBtn); });
-
-    refreshLastKey();
-    setInterval(refreshLastKey, 3000);
-
-    function renderCallImagePreview(role) {
-      var input = document.getElementById('call-' + role + '-image-value');
-      var preview = document.getElementById('call-' + role + '-image-preview');
+    function renderCallImagePreview(card) {
+      var input = card.querySelector('.call-btn-image-value');
+      var preview = card.querySelector('.call-btn-image-preview');
       var filename = input.value;
       if (filename) {
         var img = document.createElement('img');
@@ -558,11 +492,11 @@ UPLOAD_PAGE = """
 
     var pickerOverlay = document.getElementById('call-image-picker-overlay');
     var pickerGrid = document.getElementById('call-image-picker-grid');
-    var pickerRole = null;
+    var pickerButtonId = null;
 
-    function openImagePicker(role) {
-      pickerRole = role;
-      var currentValue = document.getElementById('call-' + role + '-image-value').value;
+    function openImagePicker(buttonId, card) {
+      pickerButtonId = buttonId;
+      var currentValue = card.querySelector('.call-btn-image-value').value;
       var items = pickerGrid.querySelectorAll('.picker-item');
       for (var i = 0; i < items.length; i++) {
         items[i].classList.toggle('is-selected', items[i].getAttribute('data-filename') === currentValue);
@@ -572,43 +506,33 @@ UPLOAD_PAGE = """
 
     function closeImagePicker() {
       pickerOverlay.classList.remove('is-open');
-      pickerRole = null;
+      pickerButtonId = null;
     }
 
     pickerGrid.addEventListener('click', function (e) {
       var item = e.target.closest('.picker-item');
-      if (!item || !pickerRole) {
+      if (!item || !pickerButtonId) {
         return;
       }
-      var role = pickerRole;
+      var buttonId = pickerButtonId;
       var filename = item.getAttribute('data-filename');
-      var input = document.getElementById('call-' + role + '-image-value');
-      var status = document.getElementById('call-' + role + '-status');
-      input.value = filename;
-      renderCallImagePreview(role);
+      var card = buttonsList.querySelector('.call-button-card[data-button-id="' + buttonId + '"]');
+      var status = card.querySelector('.call-btn-status');
+      card.querySelector('.call-btn-image-value').value = filename;
+      renderCallImagePreview(card);
       closeImagePicker();
 
       status.textContent = '保存しています…';
-      fetch('/settings', {
+      fetch('/call-buttons/' + encodeURIComponent(buttonId) + '/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-        body: 'call_' + role + '_image=' + encodeURIComponent(filename)
+        body: 'image=' + encodeURIComponent(filename)
       })
         .then(function (r) { return r.json(); })
-        .then(function () {
-          status.textContent = '保存しました';
-        })
-        .catch(function () {
-          status.textContent = '保存に失敗しました';
-        });
+        .then(function () { status.textContent = '保存しました'; })
+        .catch(function () { status.textContent = '保存に失敗しました'; });
     });
 
-    document.getElementById('call-customer-image-pick-btn').addEventListener('click', function () {
-      openImagePicker('customer');
-    });
-    document.getElementById('call-kitchen-image-pick-btn').addEventListener('click', function () {
-      openImagePicker('kitchen');
-    });
     document.getElementById('call-image-picker-close-btn').addEventListener('click', closeImagePicker);
     pickerOverlay.addEventListener('click', function (e) {
       if (e.target === pickerOverlay) {
@@ -616,8 +540,113 @@ UPLOAD_PAGE = """
       }
     });
 
-    renderCallImagePreview('customer');
-    renderCallImagePreview('kitchen');
+    // ボタンカード内の操作は、カードの数が可変（追加・削除される）ため、
+    // 個別に貼らずリスト全体へのイベント委任でまとめて処理する
+    buttonsList.addEventListener('click', function (e) {
+      var card = e.target.closest('.call-button-card');
+      if (!card) {
+        return;
+      }
+      var buttonId = card.getAttribute('data-button-id');
+      var status = card.querySelector('.call-btn-status');
+
+      if (e.target.closest('.call-btn-image-pick-btn')) {
+        openImagePicker(buttonId, card);
+        return;
+      }
+
+      if (e.target.closest('.call-btn-assign-key-btn')) {
+        if (!lastKeyCode) {
+          return;
+        }
+        var assignBtn = e.target.closest('.call-btn-assign-key-btn');
+        assignBtn.disabled = true;
+        status.textContent = '割り当てています…';
+        fetch('/call-buttons/' + encodeURIComponent(buttonId) + '/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+          body: 'key=' + encodeURIComponent(lastKeyCode)
+        })
+          .then(function (r) { return r.json(); })
+          .then(function () {
+            status.textContent = '割り当てました';
+            card.querySelector('.call-btn-key-label').textContent = lastKeyCode;
+          })
+          .catch(function () { status.textContent = '割り当てに失敗しました'; })
+          .finally(function () { assignBtn.disabled = false; });
+        return;
+      }
+
+      if (e.target.closest('.call-btn-delete-btn')) {
+        var label = card.querySelector('h2').textContent;
+        if (!window.confirm('「' + label + '」を削除しますか？（元に戻せません）')) {
+          return;
+        }
+        fetch('/call-buttons/' + encodeURIComponent(buttonId) + '/delete', {
+          method: 'POST',
+          headers: { 'Accept': 'application/json' }
+        })
+          .then(function () { window.location.reload(); })
+          .catch(function () { status.textContent = '削除に失敗しました'; });
+        return;
+      }
+    });
+
+    buttonsList.addEventListener('input', function (e) {
+      var slider = e.target.closest('.call-btn-duration-slider');
+      if (!slider) {
+        return;
+      }
+      var card = slider.closest('.call-button-card');
+      card.querySelector('.call-btn-duration-value').textContent = slider.value;
+    });
+
+    buttonsList.addEventListener('change', function (e) {
+      var slider = e.target.closest('.call-btn-duration-slider');
+      if (!slider) {
+        return;
+      }
+      var card = slider.closest('.call-button-card');
+      var buttonId = card.getAttribute('data-button-id');
+      var status = card.querySelector('.call-btn-status');
+      status.textContent = '保存しています…';
+      fetch('/call-buttons/' + encodeURIComponent(buttonId) + '/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+        body: 'duration=' + encodeURIComponent(slider.value)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function () { status.textContent = '保存しました'; })
+        .catch(function () { status.textContent = '保存に失敗しました'; });
+    });
+
+    document.getElementById('call-button-add-btn').addEventListener('click', function () {
+      var label = window.prompt('新しいボタンの名前を入力してください（例: ドリンクメニュー用）');
+      if (label === null) {
+        return;
+      }
+      label = label.trim();
+      if (!label) {
+        return;
+      }
+      var status = document.getElementById('call-button-add-status');
+      status.textContent = '追加しています…';
+      fetch('/call-buttons/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+        body: 'label=' + encodeURIComponent(label)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function () { window.location.reload(); })
+        .catch(function () { status.textContent = '追加に失敗しました'; });
+    });
+
+    buttonsList.querySelectorAll('.call-button-card').forEach(function (card) {
+      renderCallImagePreview(card);
+    });
+
+    refreshLastKey();
+    setInterval(refreshLastKey, 3000);
   })();
   </script>
 
@@ -1121,10 +1150,6 @@ UPLOAD_PAGE = """
               'pinned_block_size', 0);
   setupSlider('normal-block-slider', 'normal-block-value', 'normal-block-status',
               'normal_block_size', 0);
-  setupSlider('call-customer-duration-slider', 'call-customer-duration-value',
-              'call-customer-status', 'call_customer_duration', 0);
-  setupSlider('call-kitchen-duration-slider', 'call-kitchen-duration-value',
-              'call-kitchen-status', 'call_kitchen_duration', 0);
 
   function setupSelect(selectId, statusId, fieldName) {
     var select = document.getElementById(selectId);
@@ -1506,6 +1531,58 @@ def render_call_image_picker_items(files):
             f'<div class="picker-item-filename">{_h(f)}</div></div>'
         )
     return "".join(items)
+
+
+def render_call_buttons_list(buttons):
+    """呼び出し表示ボタンの一覧を、Web設定画面用のHTMLとして組み立てる。
+
+    【v4.44.0で一般化】当初は「客席用」「キッチン用」の固定2枠を、それぞれ
+    決め打ちのDOM idを持つ2つのカードとして描画していたが、任意の名前・
+    任意の個数のボタンを扱えるようにした際、ボタンの数が可変になったため
+    固定idの構造では対応できなくなった。そのため、各ボタンのカードは
+    class名+data-button-id属性で識別する方式に変更し、JS側はイベント委任
+    （リスト全体に1つだけリスナーを貼り、クリックされた要素の祖先から
+    data-button-idを辿る）でカードの数に関わらず動作するようにしている。"""
+    if not buttons:
+        return ('<p class="hint">まだボタンが登録されていません。'
+                '「+ 新しいボタンを追加」から作成してください。</p>')
+    cards = []
+    for b in buttons:
+        button_id = _h(str(b.get("id", "")))
+        label = _h(str(b.get("label", "")))
+        image = _h(str(b.get("image", "") or ""))
+        try:
+            key = int(b.get("key", 0) or 0)
+        except (TypeError, ValueError):
+            key = 0
+        key_label = str(key) if key else "未設定"
+        try:
+            duration = int(b.get("duration", CALL_DISPLAY_DEFAULT_DURATION))
+        except (TypeError, ValueError):
+            duration = CALL_DISPLAY_DEFAULT_DURATION
+        cards.append(f'''
+    <div class="setting-row call-button-card" data-button-id="{button_id}"
+         style="border:1px solid #eee; border-radius:8px; padding:12px; margin-top:12px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2 style="font-size:15px; margin:0;">{label}</h2>
+        <button type="button" class="call-btn-delete-btn"
+                style="background:#999; padding:6px 10px; font-size:12px;">削除</button>
+      </div>
+      <label style="margin-top:10px; display:block;">表示する画像</label>
+      <input type="hidden" class="call-btn-image-value" value="{image}">
+      <div class="call-image-preview call-btn-image-preview"></div>
+      <button type="button" class="call-btn-image-pick-btn">画像を選ぶ</button>
+      <p class="hint" style="margin:6px 0 0;">
+        割り当て済みのキー: <strong class="call-btn-key-label">{key_label}</strong>
+        <button type="button" class="call-btn-assign-key-btn" disabled
+                style="margin-left:8px; font-size:12px; padding:4px 8px;">検出したキーを割り当てる</button>
+      </p>
+      <label style="margin-top:10px; display:block;">表示する秒数
+        <span class="call-btn-duration-value">{duration}</span>秒</label>
+      <input type="range" class="call-btn-duration-slider" min="1" max="120" step="1" value="{duration}">
+      <p class="setting-status call-btn-status"></p>
+    </div>''')
+    return "".join(cards)
 
 
 def render_gallery_item(filename, is_hidden, priority_tag, is_pinned=False):
@@ -1983,12 +2060,6 @@ def create_app(image_folder):
             "max_pinned_images": DEFAULT_MAX_PINNED_IMAGES,
             "pinned_block_size": DEFAULT_PINNED_BLOCK_SIZE,
             "normal_block_size": DEFAULT_NORMAL_BLOCK_SIZE,
-            "call_customer_image": "",
-            "call_customer_key": 0,
-            "call_customer_duration": CALL_DISPLAY_DEFAULT_DURATION,
-            "call_kitchen_image": "",
-            "call_kitchen_key": 0,
-            "call_kitchen_duration": CALL_DISPLAY_DEFAULT_DURATION,
         })
         transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
         image_interval = int(round(float(settings.get("image_interval", DEFAULT_IMAGE_INTERVAL))))
@@ -2004,16 +2075,7 @@ def create_app(image_folder):
             settings.get("pinned_block_size", DEFAULT_PINNED_BLOCK_SIZE))))
         normal_block_size = int(round(float(
             settings.get("normal_block_size", DEFAULT_NORMAL_BLOCK_SIZE))))
-        call_customer_image = str(settings.get("call_customer_image", "") or "")
-        call_customer_key = int(settings.get("call_customer_key", 0) or 0)
-        call_customer_duration = int(round(float(
-            settings.get("call_customer_duration", CALL_DISPLAY_DEFAULT_DURATION))))
-        call_kitchen_image = str(settings.get("call_kitchen_image", "") or "")
-        call_kitchen_key = int(settings.get("call_kitchen_key", 0) or 0)
-        call_kitchen_duration = int(round(float(
-            settings.get("call_kitchen_duration", CALL_DISPLAY_DEFAULT_DURATION))))
-        call_customer_key_label = str(call_customer_key) if call_customer_key else "未設定"
-        call_kitchen_key_label = str(call_kitchen_key) if call_kitchen_key else "未設定"
+        call_buttons = signage_state.load_call_buttons(image_folder)
 
         current_conn = wifi_setup.current_connection_info()
         network_mode_labels = {
@@ -2050,12 +2112,7 @@ def create_app(image_folder):
                 .replace("__PINNED_BLOCK_SIZE__", str(pinned_block_size))
                 .replace("__NORMAL_BLOCK_SIZE__", str(normal_block_size))
                 .replace("__CALL_IMAGE_PICKER_ITEMS__", render_call_image_picker_items(files))
-                .replace("__CALL_CUSTOMER_IMAGE__", _h(call_customer_image))
-                .replace("__CALL_CUSTOMER_KEY_LABEL__", call_customer_key_label)
-                .replace("__CALL_CUSTOMER_DURATION__", str(call_customer_duration))
-                .replace("__CALL_KITCHEN_IMAGE__", _h(call_kitchen_image))
-                .replace("__CALL_KITCHEN_KEY_LABEL__", call_kitchen_key_label)
-                .replace("__CALL_KITCHEN_DURATION__", str(call_kitchen_duration))
+                .replace("__CALL_BUTTONS_HTML__", render_call_buttons_list(call_buttons))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__CURRENT_VERSION__", __version__)
                 .replace("__HOSTNAME__", socket.gethostname())
@@ -2202,9 +2259,7 @@ def create_app(image_folder):
             for key in ("transition_duration", "image_interval", "priority_interval",
                         "transition_type", "image_fit_mode", "setup_ap_ssid", "setup_ap_password",
                         "image_prefetch_window", "max_pinned_images",
-                        "pinned_block_size", "normal_block_size",
-                        "call_customer_image", "call_customer_key", "call_customer_duration",
-                        "call_kitchen_image", "call_kitchen_key", "call_kitchen_duration")
+                        "pinned_block_size", "normal_block_size")
             if key in request.form
         }
         if not raw:
@@ -2228,18 +2283,54 @@ def create_app(image_folder):
             "max_pinned_images": DEFAULT_MAX_PINNED_IMAGES,
             "pinned_block_size": DEFAULT_PINNED_BLOCK_SIZE,
             "normal_block_size": DEFAULT_NORMAL_BLOCK_SIZE,
-            "call_customer_image": "",
-            "call_customer_key": 0,
-            "call_customer_duration": CALL_DISPLAY_DEFAULT_DURATION,
-            "call_kitchen_image": "",
-            "call_kitchen_key": 0,
-            "call_kitchen_duration": CALL_DISPLAY_DEFAULT_DURATION,
         }
         result = signage_state.save_settings(image_folder, updates, defaults=defaults)
 
         if request.headers.get("Accept") == "application/json":
             return {k: result[k] for k in updates}, 200
 
+        return redirect("/")
+
+    @app.route("/call-buttons/add", methods=["POST"])
+    def call_button_add():
+        label = request.form.get("label", "")
+        if not str(label).strip():
+            return {"error": "label is required"}, 400
+        button_id = signage_state.add_call_button(image_folder, label)
+        return {"id": button_id, "label": str(label).strip()[:50]}, 200
+
+    @app.route("/call-buttons/<button_id>/update", methods=["POST"])
+    def call_button_update(button_id):
+        # 1回のリクエストにつき1項目（image/key/duration/label）だけが送られてくる
+        # 想定だが、複数まとめて送られてきても対応できるよう部分更新にしている
+        raw = {
+            key: request.form.get(key)
+            for key in ("label", "image", "key", "duration")
+            if key in request.form
+        }
+        if not raw:
+            return {"error": "no valid fields"}, 400
+
+        updates, errors = signage_state.validate_call_button_update(raw)
+        if errors:
+            key, reason = errors[0]
+            return {"error": f"invalid {key}: {reason}"}, 400
+
+        ok = signage_state.update_call_button(image_folder, button_id, **updates)
+        if not ok:
+            return {"error": "button not found"}, 404
+
+        if request.headers.get("Accept") == "application/json":
+            return {k: updates[k] for k in updates}, 200
+        return redirect("/")
+
+    @app.route("/call-buttons/<button_id>/delete", methods=["POST"])
+    def call_button_delete(button_id):
+        ok = signage_state.remove_call_button(image_folder, button_id)
+        if not ok:
+            return {"error": "button not found"}, 404
+        if request.headers.get("Accept") == "application/json":
+            return {"status": "deleted"}, 200
         return redirect("/")
 
     @app.route("/rotate", methods=["POST"])
