@@ -577,8 +577,34 @@ UPLOAD_PAGE = """
         return;
       }
 
+      if (e.target.closest('.call-btn-rename-btn')) {
+        var labelEl = card.querySelector('.call-btn-label');
+        var currentLabel = labelEl.textContent;
+        var newLabel = window.prompt('新しい名前を入力してください', currentLabel);
+        if (newLabel === null) {
+          return;
+        }
+        newLabel = newLabel.trim();
+        if (!newLabel || newLabel === currentLabel) {
+          return;
+        }
+        status.textContent = '保存しています…';
+        fetch('/call-buttons/' + encodeURIComponent(buttonId) + '/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+          body: 'label=' + encodeURIComponent(newLabel)
+        })
+          .then(function (r) { return r.json(); })
+          .then(function () {
+            labelEl.textContent = newLabel;
+            status.textContent = '保存しました';
+          })
+          .catch(function () { status.textContent = '保存に失敗しました'; });
+        return;
+      }
+
       if (e.target.closest('.call-btn-delete-btn')) {
-        var label = card.querySelector('h2').textContent;
+        var label = card.querySelector('.call-btn-label').textContent;
         if (!window.confirm('「' + label + '」を削除しますか？（元に戻せません）')) {
           return;
         }
@@ -1563,10 +1589,12 @@ def render_call_buttons_list(buttons):
         cards.append(f'''
     <div class="setting-row call-button-card" data-button-id="{button_id}"
          style="border:1px solid #eee; border-radius:8px; padding:12px; margin-top:12px;">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <h2 style="font-size:15px; margin:0;">{label}</h2>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+        <h2 class="call-btn-label" style="font-size:15px; margin:0; flex:1; min-width:0; word-break:break-all;">{label}</h2>
+        <button type="button" class="call-btn-rename-btn"
+                style="background:#777; padding:6px 10px; font-size:12px; flex-shrink:0;">名前を変更</button>
         <button type="button" class="call-btn-delete-btn"
-                style="background:#999; padding:6px 10px; font-size:12px;">削除</button>
+                style="background:#999; padding:6px 10px; font-size:12px; flex-shrink:0;">削除</button>
       </div>
       <label style="margin-top:10px; display:block;">表示する画像</label>
       <input type="hidden" class="call-btn-image-value" value="{image}">
