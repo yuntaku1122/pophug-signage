@@ -1592,9 +1592,9 @@ def render_call_buttons_list(buttons):
       <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
         <h2 class="call-btn-label" style="font-size:15px; margin:0; flex:1; min-width:0; word-break:break-all;">{label}</h2>
         <button type="button" class="call-btn-rename-btn"
-                style="background:#777; padding:6px 10px; font-size:12px; flex-shrink:0;">名前を変更</button>
+                style="width:auto; background:#777; padding:6px 10px; font-size:12px; flex-shrink:0; white-space:nowrap;">名前を変更</button>
         <button type="button" class="call-btn-delete-btn"
-                style="background:#999; padding:6px 10px; font-size:12px; flex-shrink:0;">削除</button>
+                style="width:auto; background:#999; padding:6px 10px; font-size:12px; flex-shrink:0; white-space:nowrap;">削除</button>
       </div>
       <label style="margin-top:10px; display:block;">表示する画像</label>
       <input type="hidden" class="call-btn-image-value" value="{image}">
@@ -1603,7 +1603,7 @@ def render_call_buttons_list(buttons):
       <p class="hint" style="margin:6px 0 0;">
         割り当て済みのキー: <strong class="call-btn-key-label">{key_label}</strong>
         <button type="button" class="call-btn-assign-key-btn" disabled
-                style="margin-left:8px; font-size:12px; padding:4px 8px;">検出したキーを割り当てる</button>
+                style="width:auto; margin-left:8px; font-size:12px; padding:4px 8px; white-space:nowrap;">検出したキーを割り当てる</button>
       </p>
       <label style="margin-top:10px; display:block;">表示する秒数
         <span class="call-btn-duration-value">{duration}</span>秒</label>
