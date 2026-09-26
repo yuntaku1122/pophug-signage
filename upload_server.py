@@ -214,6 +214,21 @@ UPLOAD_PAGE = """
                 background:#f0f0f0; display:block; margin-bottom:4px; }
   .modal-filename { font-size:12px; color:#888; word-break:break-all; text-align:center;
                       margin:0 0 12px; }
+  .picker-content { max-width:480px; }
+  .picker-grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-top:14px; }
+  .picker-item { cursor:pointer; border:2px solid transparent; border-radius:8px; overflow:hidden;
+                  text-align:center; padding:4px; background:#f7f7f2; }
+  .picker-item.is-selected { border-color:#228b22; background:#eaf5ea; }
+  .picker-item img { width:100%; height:64px; object-fit:cover; border-radius:6px; display:block;
+                       background:#e8e8e2; }
+  .picker-item-filename { font-size:10px; color:#888; word-break:break-all; margin-top:4px;
+                            line-height:1.3; }
+  .picker-none-item { display:flex; align-items:center; justify-content:center; height:64px;
+                        border-radius:6px; background:#e8e8e2; color:#999; font-size:12px; }
+  .call-image-preview { display:flex; align-items:center; gap:10px; margin:8px 0; }
+  .call-image-preview img { width:56px; height:56px; object-fit:cover; border-radius:6px;
+                              background:#e8e8e2; flex-shrink:0; }
+  .call-image-preview-filename { font-size:13px; color:#555; word-break:break-all; }
   .setting-row { margin-top:16px; }
   .setting-row label { font-size:14px; color:#333; display:flex; justify-content:space-between; }
   .setting-row input[type=range] { width:100%; margin:10px 0 4px; accent-color:#228b22; }
@@ -285,6 +300,14 @@ UPLOAD_PAGE = """
         __MODAL_PRIORITY_OPTIONS__
       </select>
       <button type="button" class="delete-btn" id="modal-delete-btn">削除</button>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="call-image-picker-overlay">
+    <div class="modal-content picker-content">
+      <button type="button" class="modal-close" id="call-image-picker-close-btn" aria-label="閉じる">×</button>
+      <h1 style="font-size:16px; margin:0;">画像を選ぶ</h1>
+      <div class="picker-grid" id="call-image-picker-grid">__CALL_IMAGE_PICKER_ITEMS__</div>
     </div>
   </div>
 
@@ -422,7 +445,9 @@ UPLOAD_PAGE = """
     <h2 style="font-size:15px; margin:18px 0 8px;">客席用ボタン</h2>
     <div class="setting-row">
       <label>表示する画像</label>
-      <select id="call-customer-image-select">__CALL_CUSTOMER_IMAGE_OPTIONS__</select>
+      <input type="hidden" id="call-customer-image-value" value="__CALL_CUSTOMER_IMAGE__">
+      <div class="call-image-preview" id="call-customer-image-preview"></div>
+      <button type="button" id="call-customer-image-pick-btn">画像を選ぶ</button>
       <p class="hint" style="margin:6px 0 0;">
         割り当て済みのキー: <strong id="call-customer-key-label">__CALL_CUSTOMER_KEY_LABEL__</strong>
       </p>
@@ -436,7 +461,9 @@ UPLOAD_PAGE = """
     <h2 style="font-size:15px; margin:18px 0 8px;">キッチン用ボタン</h2>
     <div class="setting-row">
       <label>表示する画像</label>
-      <select id="call-kitchen-image-select">__CALL_KITCHEN_IMAGE_OPTIONS__</select>
+      <input type="hidden" id="call-kitchen-image-value" value="__CALL_KITCHEN_IMAGE__">
+      <div class="call-image-preview" id="call-kitchen-image-preview"></div>
+      <button type="button" id="call-kitchen-image-pick-btn">画像を選ぶ</button>
       <p class="hint" style="margin:6px 0 0;">
         割り当て済みのキー: <strong id="call-kitchen-key-label">__CALL_KITCHEN_KEY_LABEL__</strong>
       </p>
@@ -511,28 +538,86 @@ UPLOAD_PAGE = """
     refreshLastKey();
     setInterval(refreshLastKey, 3000);
 
-    function setupImageSelect(selectId, fieldName, statusId) {
-      var select = document.getElementById(selectId);
-      var status = document.getElementById(statusId);
-      select.addEventListener('change', function () {
-        status.textContent = '保存しています…';
-        fetch('/settings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-          body: fieldName + '=' + encodeURIComponent(select.value)
-        })
-          .then(function (r) { return r.json(); })
-          .then(function () {
-            status.textContent = '保存しました';
-          })
-          .catch(function () {
-            status.textContent = '保存に失敗しました';
-          });
-      });
+    function renderCallImagePreview(role) {
+      var input = document.getElementById('call-' + role + '-image-value');
+      var preview = document.getElementById('call-' + role + '-image-preview');
+      var filename = input.value;
+      if (filename) {
+        var img = document.createElement('img');
+        img.src = '/img/' + encodeURIComponent(filename);
+        var label = document.createElement('span');
+        label.className = 'call-image-preview-filename';
+        label.textContent = filename;
+        preview.innerHTML = '';
+        preview.appendChild(img);
+        preview.appendChild(label);
+      } else {
+        preview.innerHTML = '<span class="call-image-preview-filename">（未設定）</span>';
+      }
     }
 
-    setupImageSelect('call-customer-image-select', 'call_customer_image', 'call-customer-status');
-    setupImageSelect('call-kitchen-image-select', 'call_kitchen_image', 'call-kitchen-status');
+    var pickerOverlay = document.getElementById('call-image-picker-overlay');
+    var pickerGrid = document.getElementById('call-image-picker-grid');
+    var pickerRole = null;
+
+    function openImagePicker(role) {
+      pickerRole = role;
+      var currentValue = document.getElementById('call-' + role + '-image-value').value;
+      var items = pickerGrid.querySelectorAll('.picker-item');
+      for (var i = 0; i < items.length; i++) {
+        items[i].classList.toggle('is-selected', items[i].getAttribute('data-filename') === currentValue);
+      }
+      pickerOverlay.classList.add('is-open');
+    }
+
+    function closeImagePicker() {
+      pickerOverlay.classList.remove('is-open');
+      pickerRole = null;
+    }
+
+    pickerGrid.addEventListener('click', function (e) {
+      var item = e.target.closest('.picker-item');
+      if (!item || !pickerRole) {
+        return;
+      }
+      var role = pickerRole;
+      var filename = item.getAttribute('data-filename');
+      var input = document.getElementById('call-' + role + '-image-value');
+      var status = document.getElementById('call-' + role + '-status');
+      input.value = filename;
+      renderCallImagePreview(role);
+      closeImagePicker();
+
+      status.textContent = '保存しています…';
+      fetch('/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+        body: 'call_' + role + '_image=' + encodeURIComponent(filename)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          status.textContent = '保存しました';
+        })
+        .catch(function () {
+          status.textContent = '保存に失敗しました';
+        });
+    });
+
+    document.getElementById('call-customer-image-pick-btn').addEventListener('click', function () {
+      openImagePicker('customer');
+    });
+    document.getElementById('call-kitchen-image-pick-btn').addEventListener('click', function () {
+      openImagePicker('kitchen');
+    });
+    document.getElementById('call-image-picker-close-btn').addEventListener('click', closeImagePicker);
+    pickerOverlay.addEventListener('click', function (e) {
+      if (e.target === pickerOverlay) {
+        closeImagePicker();
+      }
+    });
+
+    renderCallImagePreview('customer');
+    renderCallImagePreview('kitchen');
   })();
   </script>
 
@@ -1404,15 +1489,23 @@ def render_priority_select_options_plain():
     )
 
 
-def render_call_image_options(files, current_filename):
-    """呼び出し表示機能（客席用・厨房用ボタン）で「どの画像を表示するか」を
-    選ぶプルダウン用のoption一覧を組み立てる。先頭に「（未設定）」を置き、
-    現在設定されている画像があれば選択済みにする。"""
-    options = ['<option value="">（未設定）</option>']
+def render_call_image_picker_items(files):
+    """呼び出し表示機能（客席用・厨房用ボタン）の「画像を選ぶ」ピッカーに並べる
+    サムネイル一覧を組み立てる。ファイル名だけのプルダウンでは似た構図の画像を
+    見分けにくいという声を受けて、実際のサムネイルをタップして選ぶ方式にした
+    （役割ごとに選択中のものをJS側でハイライトするため、ここでは選択状態は
+    持たせない＝両方の役割で共有できる1つのグリッドとして生成する）。"""
+    items = [
+        '<div class="picker-item" data-filename="">'
+        '<div class="picker-none-item">未設定</div></div>'
+    ]
     for f in files:
-        selected = " selected" if f == current_filename else ""
-        options.append(f'<option value="{_h(f)}"{selected}>{_h(f)}</option>')
-    return "".join(options)
+        items.append(
+            f'<div class="picker-item" data-filename="{_h(f)}">'
+            f'<img src="/img/{_h(f)}" loading="lazy">'
+            f'<div class="picker-item-filename">{_h(f)}</div></div>'
+        )
+    return "".join(items)
 
 
 def render_gallery_item(filename, is_hidden, priority_tag, is_pinned=False):
@@ -1956,12 +2049,11 @@ def create_app(image_folder):
                 .replace("__MAX_PINNED_IMAGES__", str(max_pinned_images))
                 .replace("__PINNED_BLOCK_SIZE__", str(pinned_block_size))
                 .replace("__NORMAL_BLOCK_SIZE__", str(normal_block_size))
-                .replace("__CALL_CUSTOMER_IMAGE_OPTIONS__",
-                         render_call_image_options(files, call_customer_image))
+                .replace("__CALL_IMAGE_PICKER_ITEMS__", render_call_image_picker_items(files))
+                .replace("__CALL_CUSTOMER_IMAGE__", _h(call_customer_image))
                 .replace("__CALL_CUSTOMER_KEY_LABEL__", call_customer_key_label)
                 .replace("__CALL_CUSTOMER_DURATION__", str(call_customer_duration))
-                .replace("__CALL_KITCHEN_IMAGE_OPTIONS__",
-                         render_call_image_options(files, call_kitchen_image))
+                .replace("__CALL_KITCHEN_IMAGE__", _h(call_kitchen_image))
                 .replace("__CALL_KITCHEN_KEY_LABEL__", call_kitchen_key_label)
                 .replace("__CALL_KITCHEN_DURATION__", str(call_kitchen_duration))
                 .replace("__ROTATION__", str(rotation))
