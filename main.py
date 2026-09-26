@@ -21,7 +21,8 @@ from signage_state import (load_hidden, hidden_mtime, load_settings, settings_mt
                             load_usb_update_pending, usb_update_pending_mtime,
                             clear_usb_update_pending,
                             save_export_standby, load_export_standby,
-                            clear_export_standby, export_standby_mtime)
+                            clear_export_standby, export_standby_mtime,
+                            save_last_detected_key)
 from version import __version__
 import wifi_setup
 import sd_watchdog
@@ -213,6 +214,15 @@ class PopSignage:
         self.export_standby_active = False
         self.export_standby_start_time = 0
         self.last_export_standby_mtime = export_standby_mtime(IMAGE_FOLDER)
+
+        # 呼び出し表示機能（客席用・厨房用ボタン）。押されたボタンに対応する
+        # 画像を指定秒数だけ全画面表示し、終わると自動的に通常表示へ戻す。
+        self.call_active = False
+        self.call_role = None
+        self.call_start_time = 0
+        self.call_duration = 0
+        self.call_surface = None
+        self._last_call_trigger_time = {"customer": 0, "kitchen": 0}
 
         self.load_pop_images(initial=True)
 
@@ -902,6 +912,102 @@ class PopSignage:
         self.export_standby_active = False
         log(f"USB書き出し待受けモードを終了しました: {reason}")
         self._show_notice("USB書き出し待受けを終了しました")
+
+    def _handle_call_button_key(self, key_code):
+        """呼び出し表示ボタン（USB HIDボタン等）からのキー入力を処理する。
+        Web設定画面で割り当てられたキーコードと一致すれば、対応する呼び出し
+        表示を開始してTrueを返す。一致するものが無ければFalseを返す
+        （呼び出し元は、このキーを「未割り当てのキー」として記録し、
+        Web設定画面での割り当て作業を補助する）。"""
+        settings = load_settings(IMAGE_FOLDER, {"call_customer_key": 0, "call_kitchen_key": 0})
+        try:
+            customer_key = int(settings.get("call_customer_key", 0) or 0)
+        except (TypeError, ValueError):
+            customer_key = 0
+        try:
+            kitchen_key = int(settings.get("call_kitchen_key", 0) or 0)
+        except (TypeError, ValueError):
+            kitchen_key = 0
+
+        if customer_key and key_code == customer_key:
+            self._trigger_call_display("customer")
+            return True
+        if kitchen_key and key_code == kitchen_key:
+            self._trigger_call_display("kitchen")
+            return True
+        return False
+
+    def _trigger_call_display(self, role):
+        """呼び出し表示ボタンが押された時の処理。Web設定画面で役割（客席用/
+        厨房用）ごとに割り当てられた画像を、設定された秒数だけ全画面表示する。
+        画像が未設定・見つからない場合は何もしない（ボタンの誤配線・設定漏れで
+        画面が壊れないようにする）。
+
+        呼び出し表示は、QRコード表示・取扱説明・Wi-Fiセットアップ・USB書き出し
+        待受けのいずれよりも優先する。お客様・厨房からのリアルタイムな呼び出し
+        ニーズは、その場に居合わせた管理者の操作よりも優先されるべきだという
+        判断による（シャットダウン中・アップデート適用中の専有画面だけは、
+        システムの安全のため呼び出し表示より優先される＝上書きしない）。"""
+        now = time.time()
+        last = self._last_call_trigger_time.get(role, 0)
+        if now - last < CALL_DISPLAY_DEBOUNCE_SECONDS:
+            return  # チャタリング対策：短時間の連続検知は無視する
+        self._last_call_trigger_time[role] = now
+
+        settings = load_settings(IMAGE_FOLDER, {
+            f"call_{role}_image": "",
+            f"call_{role}_duration": CALL_DISPLAY_DEFAULT_DURATION,
+        })
+        filename = str(settings.get(f"call_{role}_image", "") or "").strip()
+        try:
+            duration = int(settings.get(f"call_{role}_duration", CALL_DISPLAY_DEFAULT_DURATION))
+        except (TypeError, ValueError):
+            duration = CALL_DISPLAY_DEFAULT_DURATION
+
+        if not filename:
+            log(f"呼び出し表示（{role}）が押されましたが、表示する画像が設定されていません")
+            return
+        if not os.path.exists(os.path.join(IMAGE_FOLDER, filename)):
+            log(f"呼び出し表示（{role}）に設定された画像が見つかりません: {filename}")
+            return
+
+        surf = self._decode_and_fit(filename)
+        if surf is None:
+            log(f"呼び出し表示（{role}）の画像読み込みに失敗しました: {filename}")
+            return
+
+        self._hide_qr()
+        self.manual_active = False
+        if self.wifi_setup_active:
+            self.exit_wifi_setup_mode()
+        if self.export_standby_active:
+            self._cancel_export_standby(reason="呼び出し表示のため")
+
+        self.call_active = True
+        self.call_role = role
+        self.call_start_time = now
+        self.call_duration = duration
+        self.call_surface = surf
+        log(f"呼び出し表示を開始しました（{role}、{filename}、{duration}秒間）")
+
+    def _exit_call_display(self):
+        """呼び出し表示を終了し、通常のスライドショーへ戻す
+        （タイムアウト時に呼ばれる。表示中の位置はそのまま維持され、
+        呼び出し表示前の続きから再開する）。"""
+        if not self.call_active:
+            return
+        log(f"呼び出し表示を終了しました（{self.call_role}）")
+        self.call_active = False
+        self.call_role = None
+        self.call_surface = None
+
+    def draw_call_screen(self):
+        """呼び出し表示中に毎フレーム描画する。指定された画像をそのまま
+        表示し続けるだけの、シンプルな専有画面。"""
+        if self.call_surface is not None:
+            self.canvas.blit(self.call_surface, (0, 0))
+        else:
+            self.canvas.fill((0, 0, 0))
 
     def draw_export_standby_screen(self):
         """USB書き出し待受け中に毎フレーム描画する専有画面。
@@ -1777,6 +1883,21 @@ class PopSignage:
                             else:
                                 self._enter_export_standby()
 
+                        # 上記のいずれにも該当しないキーは、呼び出し表示ボタン
+                        # （USB HIDボタン等）からの入力である可能性がある。
+                        # Web設定画面で割り当て済みのキーと一致すれば呼び出し表示を
+                        # 開始し、一致しなければ「未割り当てのキー」として記録して
+                        # Web設定画面での割り当て作業を補助する（詳細はconfig.pyの
+                        # CALL_DISPLAY_*のコメント、signage_state.save_last_detected_key）。
+                        if event.key not in (pygame.K_ESCAPE, pygame.K_q, pygame.K_m,
+                                             pygame.K_w, pygame.K_r, pygame.K_s, pygame.K_e):
+                            if not self._handle_call_button_key(event.key):
+                                try:
+                                    key_name = pygame.key.name(event.key)
+                                except Exception:
+                                    key_name = str(event.key)
+                                save_last_detected_key(IMAGE_FOLDER, event.key, key_name)
+
                 self._poll_button()
 
                 now = time.time()
@@ -1882,6 +2003,9 @@ class PopSignage:
                         and now - self.export_standby_start_time >= EXPORT_STANDBY_TIMEOUT_SECONDS):
                     self._cancel_export_standby(reason="タイムアウト")
 
+                if self.call_active and now - self.call_start_time >= self.call_duration:
+                    self._exit_call_display()
+
                 # 知っているWi-Fiが見つからない場合、自動的にスタンドアロンモードへ移行する。
                 # 起動直後は少し待ってから最初の判定を行い、以後は定期的に再判定する
                 # （途中でWi-Fi接続が切れた場合の検知も兼ねる）。
@@ -1902,6 +2026,12 @@ class PopSignage:
                     # スライドショーや古い通知・バッジが再表示されて
                     # 「失敗したのでは」と誤解されることのないようにする
                     self.draw_usb_update_applying_screen()
+                elif self.call_active:
+                    # 呼び出し表示（客席用・厨房用ボタン）。QRコード・取扱説明・
+                    # Wi-Fiセットアップ・USB書き出し待受けよりも優先する
+                    # （_trigger_call_display側でそれらは既に終了させているが、
+                    # 念のためここでも優先順位を明示している）
+                    self.draw_call_screen()
                 elif self.wifi_setup_active:
                     self.draw_wifi_setup_screen()
                 elif self.manual_active:

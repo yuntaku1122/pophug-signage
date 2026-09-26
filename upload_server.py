@@ -83,6 +83,11 @@ except ImportError:
     DEFAULT_NORMAL_BLOCK_SIZE = 4
 
 try:
+    from config import CALL_DISPLAY_DEFAULT_DURATION
+except ImportError:
+    CALL_DISPLAY_DEFAULT_DURATION = 15
+
+try:
     from config import WIFI_SETUP_SSID_PREFIX, WIFI_SETUP_DEFAULT_PASSWORD
 except ImportError:
     WIFI_SETUP_SSID_PREFIX = "pophug-setup"
@@ -388,6 +393,148 @@ UPLOAD_PAGE = """
       <p class="setting-status" id="normal-block-status"></p>
     </div>
   </div>
+
+  <div class="box" style="margin-top:16px;">
+    <h1>呼び出し表示（客席用・キッチン用ボタン）</h1>
+    <p class="hint" style="margin:0 0 12px;">
+      レジ横に置いたボタンを押すと、指定した画像を指定した秒数だけ全画面表示し、
+      終わると自動的に通常のスライドショーへ戻ります（例: メニュー一覧をお客様の
+      合図で表示、厨房から「お待たせしました」を表示）。ボタンは、USBポートに
+      挿すだけで使えるUSB HID（キーボードエミュレーション）式の押しボタンスイッチを
+      想定しています。ドライバは不要ですが、どのキーを送ってくるかは製品によって
+      異なるため、下の「最後に検出されたキー」を見ながら割り当ててください。
+    </p>
+
+    <div class="setting-row" style="background:#f5f5f0; border-radius:8px; padding:12px;">
+      <label style="margin:0;">最後に検出されたキー:
+        <strong id="last-key-label">まだありません</strong></label>
+      <p class="hint" style="margin:6px 0 0;">
+        割り当てたいボタンを一度押してから、以下のどちらかに割り当ててください
+        （割り当て済みのキーが押された場合はここには表示されません）。
+      </p>
+      <div style="margin-top:8px;">
+        <button type="button" id="assign-last-key-customer-btn" disabled>これを客席用ボタンに設定</button>
+        <button type="button" id="assign-last-key-kitchen-btn" disabled>これをキッチン用ボタンに設定</button>
+      </div>
+      <p class="setting-status" id="assign-last-key-status"></p>
+    </div>
+
+    <h2 style="font-size:15px; margin:18px 0 8px;">客席用ボタン</h2>
+    <div class="setting-row">
+      <label>表示する画像</label>
+      <select id="call-customer-image-select">__CALL_CUSTOMER_IMAGE_OPTIONS__</select>
+      <p class="hint" style="margin:6px 0 0;">
+        割り当て済みのキー: <strong id="call-customer-key-label">__CALL_CUSTOMER_KEY_LABEL__</strong>
+      </p>
+      <label style="margin-top:10px; display:block;">表示する秒数
+        <span id="call-customer-duration-value">__CALL_CUSTOMER_DURATION__</span>秒</label>
+      <input type="range" id="call-customer-duration-slider" min="1" max="120" step="1"
+             value="__CALL_CUSTOMER_DURATION__">
+      <p class="setting-status" id="call-customer-status"></p>
+    </div>
+
+    <h2 style="font-size:15px; margin:18px 0 8px;">キッチン用ボタン</h2>
+    <div class="setting-row">
+      <label>表示する画像</label>
+      <select id="call-kitchen-image-select">__CALL_KITCHEN_IMAGE_OPTIONS__</select>
+      <p class="hint" style="margin:6px 0 0;">
+        割り当て済みのキー: <strong id="call-kitchen-key-label">__CALL_KITCHEN_KEY_LABEL__</strong>
+      </p>
+      <label style="margin-top:10px; display:block;">表示する秒数
+        <span id="call-kitchen-duration-value">__CALL_KITCHEN_DURATION__</span>秒</label>
+      <input type="range" id="call-kitchen-duration-slider" min="1" max="120" step="1"
+             value="__CALL_KITCHEN_DURATION__">
+      <p class="setting-status" id="call-kitchen-status"></p>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    var lastKeyLabel = document.getElementById('last-key-label');
+    var customerBtn = document.getElementById('assign-last-key-customer-btn');
+    var kitchenBtn = document.getElementById('assign-last-key-kitchen-btn');
+    var assignStatus = document.getElementById('assign-last-key-status');
+    var lastKeyCode = null;
+
+    function refreshLastKey() {
+      fetch('/last-detected-key', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data && data.key_code) {
+            lastKeyCode = data.key_code;
+            lastKeyLabel.textContent = data.key_name + '（コード: ' + data.key_code + '）';
+            customerBtn.disabled = false;
+            kitchenBtn.disabled = false;
+          } else {
+            lastKeyCode = null;
+            lastKeyLabel.textContent = 'まだありません';
+            customerBtn.disabled = true;
+            kitchenBtn.disabled = true;
+          }
+        })
+        .catch(function () {});
+    }
+
+    function assignKey(role, btn) {
+      if (!lastKeyCode) {
+        return;
+      }
+      var field = 'call_' + role + '_key';
+      var data = {};
+      data[field] = lastKeyCode;
+      btn.disabled = true;
+      assignStatus.textContent = '割り当てています…';
+      fetch('/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+        body: field + '=' + encodeURIComponent(lastKeyCode)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          assignStatus.textContent = '割り当てました。ページを再読み込みすると反映が確認できます。';
+          var label = document.getElementById('call-' + role + '-key-label');
+          if (label) {
+            label.textContent = lastKeyCode;
+          }
+        })
+        .catch(function () {
+          assignStatus.textContent = '割り当てに失敗しました。';
+        })
+        .finally(function () {
+          btn.disabled = false;
+        });
+    }
+
+    customerBtn.addEventListener('click', function () { assignKey('customer', customerBtn); });
+    kitchenBtn.addEventListener('click', function () { assignKey('kitchen', kitchenBtn); });
+
+    refreshLastKey();
+    setInterval(refreshLastKey, 3000);
+
+    function setupImageSelect(selectId, fieldName, statusId) {
+      var select = document.getElementById(selectId);
+      var status = document.getElementById(statusId);
+      select.addEventListener('change', function () {
+        status.textContent = '保存しています…';
+        fetch('/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+          body: fieldName + '=' + encodeURIComponent(select.value)
+        })
+          .then(function (r) { return r.json(); })
+          .then(function () {
+            status.textContent = '保存しました';
+          })
+          .catch(function () {
+            status.textContent = '保存に失敗しました';
+          });
+      });
+    }
+
+    setupImageSelect('call-customer-image-select', 'call_customer_image', 'call-customer-status');
+    setupImageSelect('call-kitchen-image-select', 'call_kitchen_image', 'call-kitchen-status');
+  })();
+  </script>
 
   <div class="box" style="margin-top:16px;">
     <h1>画面の向き</h1>
@@ -889,6 +1036,10 @@ UPLOAD_PAGE = """
               'pinned_block_size', 0);
   setupSlider('normal-block-slider', 'normal-block-value', 'normal-block-status',
               'normal_block_size', 0);
+  setupSlider('call-customer-duration-slider', 'call-customer-duration-value',
+              'call-customer-status', 'call_customer_duration', 0);
+  setupSlider('call-kitchen-duration-slider', 'call-kitchen-duration-value',
+              'call-kitchen-status', 'call_kitchen_duration', 0);
 
   function setupSelect(selectId, statusId, fieldName) {
     var select = document.getElementById(selectId);
@@ -1251,6 +1402,17 @@ def render_priority_select_options_plain():
         f'<option value="{value}">{label}</option>'
         for value, label in PRIORITY_LABELS.items()
     )
+
+
+def render_call_image_options(files, current_filename):
+    """呼び出し表示機能（客席用・厨房用ボタン）で「どの画像を表示するか」を
+    選ぶプルダウン用のoption一覧を組み立てる。先頭に「（未設定）」を置き、
+    現在設定されている画像があれば選択済みにする。"""
+    options = ['<option value="">（未設定）</option>']
+    for f in files:
+        selected = " selected" if f == current_filename else ""
+        options.append(f'<option value="{_h(f)}"{selected}>{_h(f)}</option>')
+    return "".join(options)
 
 
 def render_gallery_item(filename, is_hidden, priority_tag, is_pinned=False):
@@ -1728,6 +1890,12 @@ def create_app(image_folder):
             "max_pinned_images": DEFAULT_MAX_PINNED_IMAGES,
             "pinned_block_size": DEFAULT_PINNED_BLOCK_SIZE,
             "normal_block_size": DEFAULT_NORMAL_BLOCK_SIZE,
+            "call_customer_image": "",
+            "call_customer_key": 0,
+            "call_customer_duration": CALL_DISPLAY_DEFAULT_DURATION,
+            "call_kitchen_image": "",
+            "call_kitchen_key": 0,
+            "call_kitchen_duration": CALL_DISPLAY_DEFAULT_DURATION,
         })
         transition_duration = f"{float(settings.get('transition_duration', DEFAULT_TRANSITION_DURATION)):.1f}"
         image_interval = int(round(float(settings.get("image_interval", DEFAULT_IMAGE_INTERVAL))))
@@ -1743,6 +1911,16 @@ def create_app(image_folder):
             settings.get("pinned_block_size", DEFAULT_PINNED_BLOCK_SIZE))))
         normal_block_size = int(round(float(
             settings.get("normal_block_size", DEFAULT_NORMAL_BLOCK_SIZE))))
+        call_customer_image = str(settings.get("call_customer_image", "") or "")
+        call_customer_key = int(settings.get("call_customer_key", 0) or 0)
+        call_customer_duration = int(round(float(
+            settings.get("call_customer_duration", CALL_DISPLAY_DEFAULT_DURATION))))
+        call_kitchen_image = str(settings.get("call_kitchen_image", "") or "")
+        call_kitchen_key = int(settings.get("call_kitchen_key", 0) or 0)
+        call_kitchen_duration = int(round(float(
+            settings.get("call_kitchen_duration", CALL_DISPLAY_DEFAULT_DURATION))))
+        call_customer_key_label = str(call_customer_key) if call_customer_key else "未設定"
+        call_kitchen_key_label = str(call_kitchen_key) if call_kitchen_key else "未設定"
 
         current_conn = wifi_setup.current_connection_info()
         network_mode_labels = {
@@ -1778,6 +1956,14 @@ def create_app(image_folder):
                 .replace("__MAX_PINNED_IMAGES__", str(max_pinned_images))
                 .replace("__PINNED_BLOCK_SIZE__", str(pinned_block_size))
                 .replace("__NORMAL_BLOCK_SIZE__", str(normal_block_size))
+                .replace("__CALL_CUSTOMER_IMAGE_OPTIONS__",
+                         render_call_image_options(files, call_customer_image))
+                .replace("__CALL_CUSTOMER_KEY_LABEL__", call_customer_key_label)
+                .replace("__CALL_CUSTOMER_DURATION__", str(call_customer_duration))
+                .replace("__CALL_KITCHEN_IMAGE_OPTIONS__",
+                         render_call_image_options(files, call_kitchen_image))
+                .replace("__CALL_KITCHEN_KEY_LABEL__", call_kitchen_key_label)
+                .replace("__CALL_KITCHEN_DURATION__", str(call_kitchen_duration))
                 .replace("__ROTATION__", str(rotation))
                 .replace("__CURRENT_VERSION__", __version__)
                 .replace("__HOSTNAME__", socket.gethostname())
@@ -1924,7 +2110,9 @@ def create_app(image_folder):
             for key in ("transition_duration", "image_interval", "priority_interval",
                         "transition_type", "image_fit_mode", "setup_ap_ssid", "setup_ap_password",
                         "image_prefetch_window", "max_pinned_images",
-                        "pinned_block_size", "normal_block_size")
+                        "pinned_block_size", "normal_block_size",
+                        "call_customer_image", "call_customer_key", "call_customer_duration",
+                        "call_kitchen_image", "call_kitchen_key", "call_kitchen_duration")
             if key in request.form
         }
         if not raw:
@@ -1948,6 +2136,12 @@ def create_app(image_folder):
             "max_pinned_images": DEFAULT_MAX_PINNED_IMAGES,
             "pinned_block_size": DEFAULT_PINNED_BLOCK_SIZE,
             "normal_block_size": DEFAULT_NORMAL_BLOCK_SIZE,
+            "call_customer_image": "",
+            "call_customer_key": 0,
+            "call_customer_duration": CALL_DISPLAY_DEFAULT_DURATION,
+            "call_kitchen_image": "",
+            "call_kitchen_key": 0,
+            "call_kitchen_duration": CALL_DISPLAY_DEFAULT_DURATION,
         }
         result = signage_state.save_settings(image_folder, updates, defaults=defaults)
 
@@ -2139,6 +2333,17 @@ def create_app(image_folder):
         resp = Response(body, mimetype="text/plain; charset=utf-8")
         resp.headers["Content-Disposition"] = f"attachment; filename={EXPORT_KEY_FILENAME}"
         return resp
+
+    @app.route("/last-detected-key", methods=["GET"])
+    def last_detected_key():
+        # 呼び出し表示機能（客席用・キッチン用ボタン）のセットアップ補助。
+        # main.py側のキーボードイベントハンドラが、どちらの役割にも割り当てられて
+        # いないキーを検出するたびに記録している値を返すだけの読み取り専用API。
+        # Web設定画面が数秒おきにポーリングし、「最後に検出されたキー」欄を更新する。
+        info = signage_state.load_last_detected_key(image_folder)
+        if not info:
+            return {"key_code": None, "key_name": None}, 200
+        return {"key_code": info.get("key_code"), "key_name": info.get("key_name")}, 200
 
     @app.route("/export-now", methods=["POST"])
     def export_now():

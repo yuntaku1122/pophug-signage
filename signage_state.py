@@ -331,6 +331,33 @@ def validate_settings_updates(raw_values):
         except (TypeError, ValueError):
             errors.append(("normal_block_size", "数値ではありません（1〜50の範囲で指定してください）"))
 
+    for role in ("customer", "kitchen"):
+        image_key = f"call_{role}_image"
+        if image_key in raw_values:
+            v = str(raw_values[image_key]).strip()
+            # 空文字（未設定に戻す）は許可する。パス区切り文字が含まれる値は
+            # images/フォルダ外を指すことは無いはずだが、念のため拒否する
+            if v and ("/" in v or "\\" in v or ".." in v):
+                errors.append((image_key, "不正なファイル名です"))
+            else:
+                valid[image_key] = v
+
+        key_key = f"call_{role}_key"
+        if key_key in raw_values:
+            try:
+                v = max(0, min(int(float(raw_values[key_key])), 2_000_000_000))
+                valid[key_key] = v
+            except (TypeError, ValueError):
+                errors.append((key_key, "数値ではありません（0で未設定）"))
+
+        duration_key = f"call_{role}_duration"
+        if duration_key in raw_values:
+            try:
+                v = max(1, min(int(float(raw_values[duration_key])), 120))
+                valid[duration_key] = v
+            except (TypeError, ValueError):
+                errors.append((duration_key, "数値ではありません（1〜120の範囲で指定してください）"))
+
     if "transition_type" in raw_values:
         v = str(raw_values["transition_type"]).strip()
         if v in VALID_TRANSITION_TYPES:
@@ -648,4 +675,41 @@ def export_standby_mtime(image_folder):
     try:
         return os.path.getmtime(path)
     except OSError:
+        return None
+
+
+# ---------------- 呼び出し表示機能：未割り当てキーの検出（Web設定画面での割り当て補助） ----------------
+# USB HIDボタンがどのキーコードを送ってくるかは製品によって異なるため、本体側では
+# 特定のキーコードを決め打ちにせず、main.pyのキーボードイベントハンドラで「客用・
+# 厨房用どちらにも割り当てられていないキー」が押されるたびにここへ記録する。
+# Web設定画面はこれを表示し、管理者がワンクリックでどちらかの役割に割り当てられる
+# ようにする（詳細はconfig.pyのCALL_DISPLAY_*のコメント）。
+# 更新頻度が高くなり得る（ボタンの誤検知・チャタリング等）ため、fsyncは省略する
+# （失っても実害が無い、あくまで診断・補助用のデータのため）。
+
+def _last_detected_key_path(image_folder):
+    return os.path.join(image_folder, ".last_detected_key.json")
+
+
+def save_last_detected_key(image_folder, key_code, key_name):
+    """呼び出し表示のどちらにも割り当てられていないキーが押された時に記録する。
+    Web設定画面の「最後に検出されたキー」表示・ワンクリック割り当てで使う。"""
+    data = {"key_code": key_code, "key_name": key_name, "detected_at": time.time()}
+    with _lock:
+        _atomic_write_json(_last_detected_key_path(image_folder), data, fsync=False)
+
+
+def load_last_detected_key(image_folder):
+    """直近に検出された未割り当てキーの情報（{"key_code", "key_name", "detected_at"}）
+    を返す。記録が無ければNoneを返す。"""
+    path = _last_detected_key_path(image_folder)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "key_code" not in data:
+            return None
+        return data
+    except Exception:
         return None
