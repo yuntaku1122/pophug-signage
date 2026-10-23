@@ -129,11 +129,9 @@ except ImportError:
 try:
     import config as _config
     EXPORT_KEY_FILENAME = getattr(_config, "EXPORT_KEY_FILENAME", "pophug-export-key.txt")
-    EXPORT_HOLD_SECONDS = getattr(_config, "EXPORT_HOLD_SECONDS", 15)
     DEFAULT_MAX_PINNED_IMAGES = getattr(_config, "MAX_PINNED_IMAGES", 10)
 except ImportError:
     EXPORT_KEY_FILENAME = "pophug-export-key.txt"
-    EXPORT_HOLD_SECONDS = 15
     DEFAULT_MAX_PINNED_IMAGES = 10
 
 
@@ -505,8 +503,8 @@ def find_and_stage_update_package(source_dir, image_folder):
         signage_state.save_usb_update_pending(
             image_folder, version=info["version"], zip_path=staged_zip, current_version=current)
         log(f"USBアップデートパッケージを検出・ステージングしました: {name} "
-            f"（v{current} → v{info['version']}）。本体ボタンの長押しで適用を確定できます")
-        return f"アップデート(v{info['version']})を検出しました。本体ボタンの長押しで適用できます"
+            f"（v{current} → v{info['version']}）。本体ボタンのメニューから適用を確定できます")
+        return f"アップデート(v{info['version']})を検出しました。本体ボタンのメニュー「USBアップデートを適用」から適用できます"
 
     return None
 
@@ -991,15 +989,15 @@ def handle_add(device_name):
         else:
             export_hint_message = (
                 "合言葉ファイル（ホスト名一覧）を検出しましたが、USB書き出し待受け中ではないため、"
-                f"書き出しは行われませんでした。本体ボタンを{EXPORT_HOLD_SECONDS}秒以上"
-                "長押ししてから、あらためてこのUSBメモリーを挿してください")
+                "書き出しは行われませんでした。本体ボタンを押してメニューを開き、"
+                "「USB書き出し待受け」を長押しで決定してから、あらためてこのUSBメモリーを挿してください")
 
     # 写真が1枚も無い（＝スライドショー自体には見た目の変化が起きない）USBの場合、
     # 「完全に空」「アップデートパッケージのみ」「設定ファイルのみ」「それらの
     # 組み合わせ」のどのケースでも、その場にいる人が確認できる情報は画面の通知
     # だけになる。理由が何であれ、写真が見つからなかった場合は同じ重みで
     # フルスクリーン表示にする（アップデート検出だけ小さなバナーのままだと、
-    # 「本体ボタンの長押しで適用できます」という重要な案内が見落とされかねないため）。
+    # 「本体ボタンのメニューから適用できます」という重要な案内が見落とされかねないため）。
     # 逆に写真が見つかった場合は、スライドショーの変化自体が「成功した」ことを
     # 物語るので、画面を専有するほどではない控えめなバナーのままにする。
     have_images = bool(result["imported"] or result["restored"])

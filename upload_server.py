@@ -141,11 +141,6 @@ except ImportError:
     EXPORT_KEY_FILENAME = "pophug-export-key.txt"
 
 try:
-    from config import EXPORT_HOLD_SECONDS
-except ImportError:
-    EXPORT_HOLD_SECONDS = 15
-
-try:
     from config import REQUIRED_SUDO_CAPABILITIES
 except ImportError:
     REQUIRED_SUDO_CAPABILITIES = []
@@ -1383,7 +1378,7 @@ UPLOAD_PAGE = """
       1つのファイルに複数の機体のホスト名を1行ずつ書いておけば、同じUSB1本を複数台のpophugに
       順番に挿すだけで、それぞれから書き出せます（秘密の合言葉ではないため、機体名を
       そのまま書くだけで構いません）。<br>
-      ② 本体ボタンを__EXPORT_HOLD_SECONDS__秒以上長押しすると「書き出し待受けモード」に入ります。<br>
+      ② 本体ボタンを押してメニューを開き、「USB書き出し待受け」を長押しで決定すると「書き出し待受けモード」に入ります。<br>
       ③ そのUSBメモリーを挿すと、書き出しが行われます。
     </p>
     <button type="button" id="download-hostname-btn">この機体のホスト名を書いたテキストファイルをダウンロード</button>
@@ -1839,7 +1834,7 @@ WIFI_SETUP_PAGE = """
 
   <div class="box" style="margin-top:16px;">
     <h2>次回セットアップ時のアクセスポイント名</h2>
-    <p class="hint">ボタン長押しで出てくる、この一時Wi-Fi自体の名前とパスワードを変更できます。</p>
+    <p class="hint">ボタンのメニュー「Wi-Fiセットアップ」で出てくる、この一時Wi-Fi自体の名前とパスワードを変更できます。</p>
     <form id="ap-form">
       <input type="text" id="ap-ssid" name="setup_ap_ssid" value="__AP_SSID__" maxlength="32">
       <input type="text" id="ap-password" name="setup_ap_password" value="__AP_PASSWORD__" maxlength="63">
@@ -1852,7 +1847,7 @@ WIFI_SETUP_PAGE = """
     <h2 style="color:#c0392b;">保存済みのWi-Fi接続情報を削除</h2>
     <p class="hint">これまでに接続したことのあるWi-Fi(過去のイベント会場のもの等)を、この本体からすべて忘れさせます。
       <b>今つないでいるWi-Fiも対象になるため、実行するとこのスマホが一時的に切断されることがあります。</b>
-      この本体自身のセットアップ用アクセスポイント（ボタン長押しで出てくるもの）は影響を受けません。
+      この本体自身のセットアップ用アクセスポイント（ボタンのメニュー「Wi-Fiセットアップ」で出てくるもの）は影響を受けません。
       写真やその他の設定はそのまま残ります。</p>
     <button id="forget-known-btn" type="button" style="background:#c0392b;">保存済みのWi-Fi情報をすべて削除する</button>
     <p class="status" id="forget-known-status"></p>
@@ -2146,7 +2141,6 @@ def create_app(image_folder):
                 .replace("__HOSTNAME__", socket.gethostname())
                 .replace("__UPDATE_HISTORY_HTML__", render_update_history(update_check.read_history()))
                 .replace("__NETWORK_MODE_LABEL__", network_mode_label)
-                .replace("__EXPORT_HOLD_SECONDS__", str(EXPORT_HOLD_SECONDS))
                 .replace("__GALLERY__", gallery_html)
                 .replace("__MODAL_PRIORITY_OPTIONS__", render_priority_select_options_plain())
                 .replace("__VERSION__", __version__))

@@ -10,6 +10,7 @@ import sys
 import random
 import time
 import io
+import math
 import subprocess
 import socket
 import threading
@@ -164,7 +165,7 @@ class PopSignage:
         self.qr_ip_url_surface = None
         self._qr_pause_start = None   # QR表示開始時刻（スライドショー一時停止分の巻き戻しに使う）
 
-        self.manual_active = False    # ボタン長押しで手動表示中かどうか
+        self.manual_active = False    # メニューから手動表示中かどうか
         self.manual_page_index = 0
         self.manual_page_start_time = 0
         # 取扱説明ページのレンダリング結果（タイトル/本文/フッターのSurface）を
@@ -192,7 +193,7 @@ class PopSignage:
         # 起動時点で既にファイルが存在していても前回までの古い要求なので無視する
         self.last_network_recheck_mtime = network_recheck_mtime(IMAGE_FOLDER)
 
-        # USBオフラインアップデート：保留中（本体ボタンの長押しでの確定待ち）の
+        # USBオフラインアップデート：保留中（本体ボタンのメニューでの確定待ち）の
         # パッケージ情報。ネットワーク再判定要求と違い、こちらは「起動時点で
         # 既にファイルが存在していれば、それも尊重して読み込む」。前回起動中に
         # USBでパッケージを検出したものの、確定する前に再起動されたケースでも
@@ -201,9 +202,21 @@ class PopSignage:
         self.last_usb_update_pending_mtime = usb_update_pending_mtime(IMAGE_FOLDER)
         self._usb_update_applying = False  # 適用処理の多重起動防止
 
-        self._shutting_down = False  # ボタン長押しでシャットダウンが確定した後、真になる
+        self._shutting_down = False  # メニューでシャットダウンが確定した後、真になる
 
-        # USB書き出し（吸い出し）機能：ボタン長押しでの待受けモード。
+        # 機能メニュー（v4.45.0〜）。通常画面でボタンを押すと開き、
+        # 短押し=次の項目、長押し=決定で全ての機能を選ぶ。開いている間は
+        # スライドショーを止めて専有画面（draw_menu_screen）を毎フレーム描画する。
+        self.menu_active = False
+        self.menu_items = []            # [(id, 表示ラベル), ...] 開いた時点の一覧
+        self.menu_index = 0
+        self.menu_confirm = None        # "shutdown" の間は確認画面を表示中
+        self.menu_last_input_time = 0   # 最後に操作された時刻（無操作タイムアウト用）
+        self._menu_pause_start = 0      # メニューを開いて（スライドショーを止めて）いる開始時刻
+        self._menu_render_cache = {"key": None, "surface": None}
+        self._menu_gauge_labels = {}
+
+        # USB書き出し（吸い出し）機能：機能メニューからの待受けモード。
         # 起動時点で待受けファイルが残っていても（前回起動中に開始して
         # 確定しないまま再起動された等）、今回の起動では引き継がず一旦解除する。
         # main.py（このプロセス）のself.export_standby_activeが唯一の
@@ -658,39 +671,55 @@ class PopSignage:
     # ---------------- QRコード表示ボタン ----------------
 
     def setup_qr_button(self):
-        """ボタン1つで6段階の操作を行う。
-        短押し             : QRコード表示/非表示トグル
-        MANUAL_HOLD_SECONDS秒以上長押し        : 取扱説明を表示
-        WIFI_SETUP_HOLD_SECONDS秒以上長押し    : Wi-Fiセットアップモード
-        RESET_DISPLAY_HOLD_SECONDS秒以上長押し : 表示リセット（固定表示のみ表示）
-        SHUTDOWN_HOLD_SECONDS秒以上長押し      : シャットダウン
-        EXPORT_HOLD_SECONDS秒以上長押し        : USB書き出し待受けモード
-        判定は「離した瞬間の合計長押し時間」で行う（押している間は毎フレーム
-        run()から_poll_button()が呼ばれ、進捗を画面に表示する）。
-        ラズパイ実機ではGPIOボタン、Mac等GPIOが無い環境では
+        """ボタン1つで全ての機能を操作する（v4.45.0〜 機能メニュー方式）。
+        通常画面で押す        : 機能メニューを開く
+        メニュー内で短押し    : 次の項目へ（最後の項目の次は先頭に戻る）
+        メニュー内で長押し    : 選んだ項目を決定（MENU_DECIDE_HOLD_SECONDS秒以上押して離す）
+        シャットダウンだけは、決定後に確認画面を挟み、もう一度長押しで実行、
+        短押しでキャンセルになる。メニューは無操作でMENU_TIMEOUT_SECONDS秒経つと
+        自動的に閉じる。
+        QR表示・取扱説明・Wi-Fiセットアップ・USB書き出し待受けの各画面が出ている間は、
+        ボタンを押すとその画面を閉じる（従来通り）。
+        判定は「離した瞬間の合計押下時間」で行う（押している間は毎フレーム
+        run()から_poll_button()が呼ばれ、メニュー内では決定までの進捗ゲージを表示する）。
+        ラズパイ実機ではGPIOボタン、Mac等GPIOが無い環境ではスペースキー
+        （押している間がボタン押下）で代用できる。そのほか開発確認用に
         Qキー(QR表示)・Mキー(取扱説明)・Wキー(Wi-Fiセットアップモード)・
         Rキー(表示リセット)・Sキー(シャットダウン)・Eキー(USB書き出し待受け)
-        で代用する。"""
+        でメニューを経由せず各機能を直接呼び出せる。"""
         self._qr_button = None
         self._button_press_start = None
         try:
             from gpiozero import Button
             self._qr_button = Button(QR_BUTTON_GPIO_PIN, pull_up=True, bounce_time=0.2)
             log(f"QRボタン待受け開始（GPIO{QR_BUTTON_GPIO_PIN}）: "
-                f"短押し=QR表示 / {MANUAL_HOLD_SECONDS}秒長押し=取扱説明 / "
-                f"{WIFI_SETUP_HOLD_SECONDS}秒長押し=Wi-Fiセットアップ / "
-                f"{RESET_DISPLAY_HOLD_SECONDS}秒長押し=表示リセット / "
-                f"{SHUTDOWN_HOLD_SECONDS}秒長押し=シャットダウン / "
-                f"{EXPORT_HOLD_SECONDS}秒長押し=USB書き出し待受け")
+                f"押す=機能メニューを開く / メニュー内で短押し=次へ / "
+                f"{MENU_DECIDE_HOLD_SECONDS:g}秒以上長押し=決定 / "
+                f"無操作{MENU_TIMEOUT_SECONDS}秒で自動的に閉じる")
         except Exception as e:
             log(f"GPIOボタンが利用できません（{e}）。"
-                f"代わりにキーボードの[Q]キーでQR表示、[M]キーで取扱説明、"
-                f"[W]キーでWi-Fiセットアップ、[R]キーで表示リセット、"
-                f"[S]キーでシャットダウン、[E]キーでUSB書き出し待受けを確認できます")
+                f"代わりにキーボードの[スペース]キー（押している間がボタン押下）で機能メニューを"
+                f"操作できます。[Q]QR表示・[M]取扱説明・[W]Wi-Fiセットアップ・[R]表示リセット・"
+                f"[S]シャットダウン・[E]USB書き出し待受けは直接呼び出せます")
+
+    def _emulated_button_down(self):
+        """GPIOボタンが無い環境（Mac等）で、スペースキーの押下をボタン押下として扱う"""
+        if self._qr_button is not None:
+            return
+        if self._button_press_start is None:
+            self._button_press_start = time.time()
+
+    def _emulated_button_up(self):
+        """GPIOボタンが無い環境（Mac等）で、スペースキーを離した時の処理"""
+        if self._qr_button is not None or self._button_press_start is None:
+            return
+        held = time.time() - self._button_press_start
+        self._button_press_start = None
+        self._handle_button_release(held)
 
     def _poll_button(self):
         """毎フレーム呼ばれ、物理ボタンの押下時間を監視する。gpiozeroのコールバックではなく
-        ポーリング方式にしているのは、長押し中の残り時間を画面に表示したいため。"""
+        ポーリング方式にしているのは、メニュー内で決定までの進捗ゲージを画面に表示したいため。"""
         if self._qr_button is None:
             return
 
@@ -705,16 +734,35 @@ class PopSignage:
             self._handle_button_release(held)
 
     def _handle_button_release(self, held_seconds):
-        """ボタンが離された時、押していた時間に応じた動作を実行する"""
+        """ボタンが離された時の処理。状態ごとに次の優先順で振り分ける
+        （上にあるものほど優先）：
+        シャットダウン確定後・USBアップデート適用中 : 一切反応しない
+        呼び出し表示中                               : 反応しない（客席・厨房からの表示を優先）
+        機能メニュー表示中                           : 短押し=次へ／長押し=決定
+        USB書き出し待受け中・Wi-Fi案内画面・取扱説明・QR表示中 : 押した時間に関わらず閉じる
+        上記以外（通常画面）                         : 機能メニューを開く"""
         if self._shutting_down:
             # シャットダウンが確定した後は、実際に電源が落ちるまでの短い間に
             # ボタンが再度押されても一切反応しない（誤操作防止）
             return
 
+        if self._usb_update_applying:
+            # 既に適用処理が進行中の間は、どんな操作も受け付けない
+            # （ステージング済みzipを消してしまうと、進行中の適用処理が
+            # 参照しているファイルが無くなり中途半端な状態になりかねないため）
+            log("USBアップデートは適用処理中のため、ボタン操作を無視しました")
+            return
+
+        if self.call_active:
+            # 呼び出し表示中は、その画面を優先する（メニューを重ねて開かない）
+            return
+
+        if self.menu_active:
+            self._menu_handle_release(held_seconds)
+            return
+
         if self.export_standby_active:
             # USB書き出し待受け中は、押した時間に関わらずキャンセル操作として扱う
-            # （待受けに入るための長押しラダーとは独立させ、誤って別の操作と
-            # 混同しないようにするため。他の能動的モードと同じ扱い）
             self._cancel_export_standby(reason="ボタン操作によりキャンセル")
             return
 
@@ -724,39 +772,124 @@ class PopSignage:
             return
 
         if self.manual_active:
-            # 取扱説明の表示中でも、SHUTDOWN_HOLD_SECONDS以上の長押しだけは
-            # シャットダウンとして扱う（説明書を見ながら片付けたい場面で
-            # シャットダウンできないのは不便なため）。_trigger_button_shutdown()
-            # は内部でmanual_activeをFalseに戻すので、そのまま呼んでよい。
-            # それ未満の押下は、従来通り押した時間に関わらず「閉じる」操作として扱う。
-            if held_seconds >= SHUTDOWN_HOLD_SECONDS:
+            # 取扱説明は、押した時間に関わらず「閉じる」操作として扱う
+            self.toggle_manual()
+            return
+
+        if self.qr_active:
+            # QR表示中にもう一度押されたら、QRだけを即座に消す（従来通り）
+            self._hide_qr()
+            log("QRコード非表示（ボタン再押下）")
+            return
+
+        self._open_menu()
+
+    # ---------------- 機能メニュー ----------------
+
+    def _build_menu_items(self):
+        """今の状態に応じたメニュー項目の一覧を作る。[(id, 表示ラベル), ...]
+        USBアップデートの項目は、確定待ちのパッケージがある時だけ表示する。"""
+        items = [
+            ("qr", "QRコードを表示（写真を送る）"),
+            ("manual", "取扱説明を見る"),
+            ("wifi", "Wi-Fiセットアップ"),
+        ]
+        if self.usb_update_pending:
+            version = self.usb_update_pending.get("version", "?")
+            items.append(("usb_apply", f"USBアップデートを適用（v{version}）"))
+            items.append(("usb_dismiss", "USBアップデートを見送る"))
+        items += [
+            ("export", "USB書き出し待受け"),
+            ("reset", "表示をリセット（固定表示のみに）"),
+            ("shutdown", "シャットダウン"),
+            ("close", "閉じる"),
+        ]
+        return items
+
+    def _open_menu(self):
+        """機能メニューを開く。メニュー表示中はスライドショーを止めて専有画面にする。"""
+        self._hide_qr()
+        self.menu_items = self._build_menu_items()
+        self.menu_index = 0
+        self.menu_confirm = None
+        self.menu_active = True
+        self.menu_last_input_time = time.time()
+        self._menu_pause_start = self.menu_last_input_time  # スライドショーを止めた時刻
+        self._menu_render_cache = {"key": None, "surface": None}
+        log("機能メニューを開きました")
+
+    def _close_menu(self, reason):
+        """機能メニューを閉じて通常画面へ戻る。メニュー表示中は
+        スライドショーのタイマーが進んでしまうため、QR表示の時と同様に、
+        止まっていた時間分を巻き戻して違和感なく続きから再開させる。"""
+        if not self.menu_active:
+            return
+        paused = time.time() - self._menu_pause_start
+        self.pop_start_time += paused
+        if self.in_transition:
+            self.transition_start_time += paused
+        self.menu_active = False
+        self.menu_confirm = None
+        self._menu_render_cache = {"key": None, "surface": None}
+        log(f"機能メニューを閉じました（{reason}）")
+
+    def _menu_handle_release(self, held_seconds):
+        """メニュー表示中にボタンが離された時の処理。
+        MENU_DECIDE_HOLD_SECONDS秒以上=決定、それ未満=次の項目へ。
+        シャットダウン確認画面では、長押し=実行、短押し=キャンセル（メニューの一覧に戻る）。"""
+        self.menu_last_input_time = time.time()
+        decided = held_seconds >= MENU_DECIDE_HOLD_SECONDS
+
+        if self.menu_confirm == "shutdown":
+            if decided:
+                self._close_menu("シャットダウンを確定")
                 self._trigger_button_shutdown()
             else:
-                self.toggle_manual()
+                self.menu_confirm = None
+                log("シャットダウンをキャンセルしました")
             return
 
-        if self.usb_update_pending:
-            # USBアップデートパッケージが確定待ちの間は、ボタンの意味を
-            # 丸ごと「適用の確定/見送り」に切り替える（通常のQR表示等の
-            # ラダーとは独立させ、誤って別の操作と混同しないようにするため）
-            self._handle_usb_update_button(held_seconds)
+        if not self.menu_items:
+            self._close_menu("項目なし")
             return
 
-        if held_seconds >= EXPORT_HOLD_SECONDS:
-            self._enter_export_standby()
-        elif held_seconds >= SHUTDOWN_HOLD_SECONDS:
-            self._trigger_button_shutdown()
-        elif held_seconds >= RESET_DISPLAY_HOLD_SECONDS:
-            self._reset_display_to_pinned_only()
-        elif held_seconds >= WIFI_SETUP_HOLD_SECONDS:
-            self.enter_wifi_setup_mode()
-        elif held_seconds >= MANUAL_HOLD_SECONDS:
-            self.toggle_manual()
+        if decided:
+            item_id = self.menu_items[self.menu_index][0]
+            self._menu_execute(item_id)
         else:
+            self.menu_index = (self.menu_index + 1) % len(self.menu_items)
+
+    def _menu_execute(self, item_id):
+        """メニューで決定された項目を実行する。シャットダウンだけは
+        メニューを開いたまま確認画面へ進み、それ以外はメニューを閉じてから実行する。"""
+        log(f"機能メニューで決定: {item_id}")
+        if item_id == "shutdown":
+            self.menu_confirm = "shutdown"
+            return
+
+        self._close_menu(f"{item_id}を決定")
+        if item_id == "qr":
             self.toggle_qr_code()
+        elif item_id == "manual":
+            self.toggle_manual()
+        elif item_id == "wifi":
+            self.enter_wifi_setup_mode()
+        elif item_id == "usb_apply":
+            pending = self.usb_update_pending
+            if pending:
+                self._confirm_usb_update(pending)
+        elif item_id == "usb_dismiss":
+            pending = self.usb_update_pending
+            if pending:
+                self._dismiss_usb_update(pending, reason="メニューから見送り")
+        elif item_id == "export":
+            self._enter_export_standby()
+        elif item_id == "reset":
+            self._reset_display_to_pinned_only()
+        # "close" は閉じるだけ（上でメニューは閉じ済み）
 
     def _reset_display_to_pinned_only(self):
-        """ボタン長押しで、表示状態だけを初期化する（固定表示画像だけを表示状態にし、
+        """メニューの「表示をリセット」で、表示状態だけを初期化する（固定表示画像だけを表示状態にし、
         それ以外を全て非表示にする）。images/フォルダの画像データ自体は一切削除しない。
 
         次の事業者に本体を引き継ぐ場面を想定している。この操作をしておけば、
@@ -776,29 +909,14 @@ class PopSignage:
         hidden = set(f for f in files if f not in pinned)
         save_hidden(IMAGE_FOLDER, hidden)
 
-        log(f"ボタン長押しにより表示をリセットしました"
+        log(f"メニューの操作により表示をリセットしました"
             f"（固定表示{len(shown)}枚のみ表示、{len(hidden)}枚を非表示化。画像データは削除していません）")
         self._show_notice(f"表示をリセットしました（固定表示{len(shown)}枚のみ表示中）")
 
-    def _handle_usb_update_button(self, held_seconds):
-        """USBアップデートパッケージが確定待ちの間のボタン処理。
-        USB_UPDATE_CONFIRM_HOLD_SECONDS秒以上の長押しだけを「確定・適用」とし、
-        それ未満（短押しも含む）は全て「見送り（キャンセル）」として扱う。
-        誤操作防止のため、確定には明確な長押しを必須にしている。"""
-        pending = self.usb_update_pending
-        if self._usb_update_applying:
-            # 既に適用処理が進行中の間は、確定・見送りどちらの操作も受け付けない
-            # （見送り操作でステージング済みzipを消してしまうと、進行中の適用処理が
-            # 参照しているファイルが無くなり中途半端な状態になりかねないため）
-            log("USBアップデートは適用処理中のため、ボタン操作を無視しました")
-            return
-        if held_seconds >= USB_UPDATE_CONFIRM_HOLD_SECONDS:
-            self._confirm_usb_update(pending)
-        else:
-            self._dismiss_usb_update(pending, reason="ボタン短押しのため見送り")
-
     def _confirm_usb_update(self, pending):
-        """保留中のUSBアップデートをボタン長押しで確定し、適用する。
+        """保留中のUSBアップデートを、機能メニューの「USBアップデートを適用」
+        （長押しで決定）で確定し、適用する。多重起動の防止は、呼び出し元の
+        _handle_button_release（_usb_update_applying中は全ての操作を無視）で行っている。
         適用処理そのものはオンラインOTAと全く同じ検証・バックアップ・
         ロールバック経路（update_check.apply_update_from_zip）を通るため、
         安全性は同等。成功時はこの後サービスごと再起動される想定。それまでの
@@ -806,12 +924,11 @@ class PopSignage:
         を毎フレーム描画し続けるため、途中でスライドショーや古い通知・バッジに
         画面が戻って「失敗した？」と誤解されることはない。失敗時はロールバック
         済みで元のバージョンのまま動き続けるので、エラー内容を通知して
-        保留状態だけ解除する。多重起動防止は呼び出し元(_handle_usb_update_button)
-        で行っている。"""
+        保留状態だけ解除する。"""
         version = pending.get("version", "?")
         zip_path = pending.get("zip_path")
         self._usb_update_applying = True
-        log(f"USBアップデートの適用をボタン長押しで確定しました: v{version}")
+        log(f"USBアップデートの適用をメニューの長押しで確定しました: v{version}")
 
         self._hide_qr()
         self.manual_active = False
@@ -841,15 +958,18 @@ class PopSignage:
             f"再度適用するにはUSBメモリーを挿し直してください")
 
     def _trigger_button_shutdown(self):
-        """物理ボタンの長押しでシャットダウンを実行する（Web版と同じsudoersの許可を利用）。
+        """機能メニューのシャットダウン確認（長押し）でシャットダウンを実行する
+        （Web版と同じsudoersの許可を利用）。
         以前はここで「シャットダウンしています...」を1フレームだけ描画してflipしていたが、
         実際のシャットダウンコマンドが効くまでの1秒ほどの間にrun()側の通常描画（スライドショー）
         に上書きされてしまい、あたかもシャットダウンされなかったかのように見える不具合があった
         （USBアップデート適用中の表示と同種の問題）。_shutting_downフラグをrun()側の描画分岐に
         組み込み、電源が落ちるまで専有画面を毎フレーム描画し続けるようにしている。"""
-        log("ボタン長押しによるシャットダウン要求を受け付けました")
+        log("ボタン操作によるシャットダウン要求を受け付けました")
         self._hide_qr()
         self.manual_active = False
+        self.menu_active = False
+        self.menu_confirm = None
         self._shutting_down = True
 
         def do_shutdown():
@@ -883,7 +1003,7 @@ class PopSignage:
                                 base_y + surf.get_height() + 16))
 
     def _enter_export_standby(self):
-        """ボタンの最長長押しで、USB書き出し待受けモードに入る。
+        """機能メニューの「USB書き出し待受け」で、USB書き出し待受けモードに入る。
         待受け中は images/.export_standby.json に期限付きで記録し、root権限で
         動くpophug-usb-import（別プロセス）が、USBメモリー挿入時にこれを見て
         書き出しを試みるかどうかを判断する（挿したUSBに、この機体のホスト名が
@@ -972,6 +1092,8 @@ class PopSignage:
 
         self._hide_qr()
         self.manual_active = False
+        if self.menu_active:
+            self._close_menu("呼び出し表示のため")
         if self.wifi_setup_active:
             self.exit_wifi_setup_mode()
         if self.export_standby_active:
@@ -1026,68 +1148,164 @@ class PopSignage:
         self.canvas.blit(sub2, (self.canvas.get_width() // 2 - sub2.get_width() // 2,
                                  base_y + surf.get_height() + 12 + sub.get_height() + 12))
 
-    def draw_button_hold_overlay(self):
-        """ボタンを押している最中、あとどれだけ押せば何が起きるかを画面に表示する"""
+    def _menu_gauge_progress(self):
+        """メニュー内でボタンを押している間の、決定ゲージの進捗（0.0〜1.0）を返す。
+        押していない間、またはまだ押し始めたばかり（MENU_GAUGE_START_SECONDS未満）の間は
+        None。ごく短い「次へ」操作でゲージがチラつかないようにするため。"""
         if self._button_press_start is None:
-            return
+            return None
         held = time.time() - self._button_press_start
-        if held < 0.6:
-            return  # QR表示用の短押しの邪魔をしないよう、少し経ってから表示する
+        if held < MENU_GAUGE_START_SECONDS:
+            return None
+        return min(1.0, held / MENU_DECIDE_HOLD_SECONDS)
 
+    @staticmethod
+    def _menu_metrics(w, h):
+        """メニュー画面のレイアウト寸法を、キャンバスサイズから一括で決める。
+        静的な部分（_render_menu_layer）と決定ゲージ（draw_menu_screen）の両方が
+        同じ値を使うことで、小さい画面でも案内文とゲージが重ならないようにしている。"""
+        margin = max(16, w // 40)
+        unit = max(10, h // 36)
+        label_size = max(16, h // 24)            # ゲージ上の案内文のフォントサイズ
+        bar_h = max(10, h // 40)                 # ゲージ本体の太さ
+        bottom_gap = max(8, h // 60)             # ゲージ下端と画面下端の隙間
+        label_gap = max(4, h // 120)             # 案内文とゲージの隙間
+        # 画面最下部の「決定ゲージ用の帯」の高さ（案内文＋隙間＋ゲージ＋下の隙間＋余白）
+        band_h = int(label_size * 1.4) + label_gap + bar_h + bottom_gap + 4
+        help_size = max(14, int(unit * 1.5))     # 操作案内（短く押す＝次へ…）のフォントサイズ
+        return {"margin": margin, "unit": unit, "label_size": label_size, "bar_h": bar_h,
+                "bottom_gap": bottom_gap, "label_gap": label_gap, "band_h": band_h,
+                "help_size": help_size}
+
+    def _menu_gauge_label(self, text, color):
+        """ゲージ上の案内文のSurface。同じ文言・色は使い回す（毎フレーム描き直さない）"""
         w = self.canvas.get_width()
         h = self.canvas.get_height()
-        overlay = pygame.Surface((w, h))
-        overlay.set_alpha(210)
-        overlay.fill((10, 10, 10))
-        self.canvas.blit(overlay, (0, 0))
+        key = (text, color, w, h)
+        surf = self._menu_gauge_labels.get(key)
+        if surf is None:
+            size = self._menu_metrics(w, h)["label_size"]
+            surf = self._render_fit_text(text, w - 48, start_size=size, min_size=12, color=color)
+            self._menu_gauge_labels[key] = surf
+        return surf
 
-        if self.manual_active:
-            # 取扱説明の表示中は、通常の5段階ラダーではなく「シャットダウンか、
-            # 閉じるか」の2択だけを見せる（_handle_button_release側の分岐と対応させる）
-            if held >= SHUTDOWN_HOLD_SECONDS:
-                text = "離すとシャットダウンします"
-                color = (255, 90, 90)
-            else:
-                remaining = SHUTDOWN_HOLD_SECONDS - held
-                text = f"長押し中...あと{remaining:.1f}秒でシャットダウン（今離すと閉じます）"
+    def _render_menu_layer(self, w, h, remaining_sec):
+        """機能メニューの静的な部分（背景・項目一覧・案内文）を1枚のSurfaceに描く。
+        選択位置・項目・残り秒数・確認画面かどうかが変わった時だけ呼ばれる
+        （毎フレーム日本語テキストを描き直すのは、非力なPi Zero 2Wには重すぎるため）。"""
+        surf = pygame.Surface((w, h))
+        surf.fill((18, 18, 26))
+        m = self._menu_metrics(w, h)
+        margin = m["margin"]
+        unit = m["unit"]
+
+        def blit_center(text_surf, y):
+            surf.blit(text_surf, (w // 2 - text_surf.get_width() // 2, y))
+
+        timeout_text = f"{remaining_sec}秒操作が無いと通常画面に戻ります"
+        # 画面下部は、決定ゲージ用の帯（band_h）と、その上の案内文2行を確保する
+        band_h = m["band_h"]
+        help_size = m["help_size"]
+
+        if self.menu_confirm == "shutdown":
+            title = self._render_fit_text("シャットダウンしますか？", w - margin * 2,
+                                          start_size=unit * 2, min_size=16, color=(255, 120, 120))
+            sub1 = self._render_fit_text("もう一度長押しで実行", w - margin * 2,
+                                         start_size=int(unit * 1.5), min_size=12, color=(255, 255, 255))
+            sub2 = self._render_fit_text("短く押すとキャンセル", w - margin * 2,
+                                         start_size=int(unit * 1.5), min_size=12, color=(200, 200, 210))
+            total_h = title.get_height() + unit + sub1.get_height() + unit // 2 + sub2.get_height()
+            y = (h - band_h) // 2 - total_h // 2
+            blit_center(title, y)
+            y += title.get_height() + unit
+            blit_center(sub1, y)
+            y += sub1.get_height() + unit // 2
+            blit_center(sub2, y)
+            foot = self._render_fit_text(timeout_text, w - margin * 2,
+                                         start_size=help_size, min_size=10, color=(150, 150, 160))
+            blit_center(foot, h - band_h - foot.get_height() - unit // 2)
+            return surf
+
+        title = self._render_fit_text("メニュー", w - margin * 2,
+                                      start_size=int(unit * 1.8), min_size=14, color=(255, 255, 255))
+        surf.blit(title, (margin, margin // 2))
+        top = margin // 2 + title.get_height() + unit // 2
+
+        help1 = self._render_fit_text("短く押す＝次へ　／　長押し＝決定", w - margin * 2,
+                                      start_size=help_size, min_size=10, color=(200, 200, 210))
+        help2 = self._render_fit_text(timeout_text, w - margin * 2,
+                                      start_size=help_size, min_size=10, color=(150, 150, 160))
+        help2_y = h - band_h - help2.get_height() - 2
+        help1_y = help2_y - help1.get_height() - 2
+        blit_center(help1, help1_y)
+        blit_center(help2, help2_y)
+
+        bottom = help1_y - unit // 2
+        n = max(1, len(self.menu_items))
+        row_h = max(14, min(int(unit * 2.8), (bottom - top) // n))
+        gap = max(2, row_h // 10)
+        text_size = max(12, int(row_h * 0.58))
+        for i, (item_id, label) in enumerate(self.menu_items):
+            y = top + i * row_h
+            rect = pygame.Rect(margin, y, w - margin * 2, row_h - gap)
+            selected = (i == self.menu_index)
+            if selected:
+                pygame.draw.rect(surf, (194, 89, 122), rect, border_radius=max(4, row_h // 5))
                 color = (255, 255, 255)
-        elif self.usb_update_pending:
-            # 保留中のUSBアップデートがある間は、通常のラダー（取扱説明～
-            # シャットダウン）を丸ごと無視し、確定/見送りの進捗だけを見せる
-            version = self.usb_update_pending.get("version", "?")
-            if held >= USB_UPDATE_CONFIRM_HOLD_SECONDS:
-                text = f"離すとアップデートを適用します（v{version}）"
-                color = (150, 220, 255)
             else:
-                remaining = USB_UPDATE_CONFIRM_HOLD_SECONDS - held
-                text = f"長押し中...あと{remaining:.1f}秒でアップデート適用（v{version}）（今離すと見送り）"
-                color = (255, 210, 120)
-        elif held >= EXPORT_HOLD_SECONDS:
-            text = "離すとUSB書き出し待受けモードに入ります"
-            color = (150, 220, 255)
-        elif held >= SHUTDOWN_HOLD_SECONDS:
-            remaining = EXPORT_HOLD_SECONDS - held
-            text = f"離すとシャットダウンします（あと{remaining:.0f}秒でUSB書き出し待受け）"
-            color = (255, 90, 90)
-        elif held >= RESET_DISPLAY_HOLD_SECONDS:
-            remaining = SHUTDOWN_HOLD_SECONDS - held
-            text = f"離すと表示をリセット（固定表示のみに）（あと{remaining:.0f}秒でシャットダウン）"
-            color = (255, 170, 100)
-        elif held >= WIFI_SETUP_HOLD_SECONDS:
-            remaining = RESET_DISPLAY_HOLD_SECONDS - held
-            text = f"離すとWi-Fiセットアップモード（あと{remaining:.0f}秒で表示リセット）"
-            color = (255, 210, 120)
-        elif held >= MANUAL_HOLD_SECONDS:
-            remaining = WIFI_SETUP_HOLD_SECONDS - held
-            text = f"離すと取扱説明を表示（あと{remaining:.0f}秒でWi-Fiセットアップ）"
-            color = (150, 210, 255)
-        else:
-            remaining = MANUAL_HOLD_SECONDS - held
-            text = f"長押し中...（あと{remaining:.1f}秒で取扱説明）"
-            color = (255, 255, 255)
+                pygame.draw.rect(surf, (38, 38, 50), rect, border_radius=max(4, row_h // 5))
+                color = (255, 150, 150) if item_id == "shutdown" else (200, 200, 210)
+            text = self._render_fit_text(label, rect.width - margin, start_size=text_size,
+                                         min_size=10, color=color)
+            surf.blit(text, (rect.x + margin // 2, rect.y + (rect.height - text.get_height()) // 2))
+        return surf
 
-        surf = self._render_fit_text(text, w - 48, start_size=28, min_size=14, color=color)
-        self.canvas.blit(surf, (w // 2 - surf.get_width() // 2, h // 2 - surf.get_height() // 2))
+    def draw_menu_screen(self):
+        """機能メニューを毎フレーム描画する専有画面（スライドショーは止まる）。
+        静的な部分はキャッシュし、決定ゲージ（ボタンを押している間だけ伸びる帯）だけを
+        毎フレーム描く。ボタンを押している間は無操作タイムアウトを進めないので、
+        残り秒数も満タンのまま表示する。"""
+        w = self.canvas.get_width()
+        h = self.canvas.get_height()
+        if self._button_press_start is not None:
+            remaining = MENU_TIMEOUT_SECONDS
+        else:
+            remaining = max(0.0, MENU_TIMEOUT_SECONDS - (time.time() - self.menu_last_input_time))
+        remaining_sec = int(math.ceil(remaining))
+
+        key = (tuple(self.menu_items), self.menu_index, self.menu_confirm, w, h, remaining_sec)
+        if self._menu_render_cache.get("key") != key:
+            self._menu_render_cache = {"key": key, "surface": self._render_menu_layer(w, h, remaining_sec)}
+        self.canvas.blit(self._menu_render_cache["surface"], (0, 0))
+
+        progress = self._menu_gauge_progress()
+        if progress is None:
+            return
+
+        m = self._menu_metrics(w, h)
+        margin = m["margin"]
+        bar_h = m["bar_h"]
+        bar_rect = pygame.Rect(margin, h - bar_h - m["bottom_gap"], w - margin * 2, bar_h)
+        full = progress >= 1.0
+        danger = (self.menu_confirm == "shutdown")
+        if danger:
+            fill_color = (255, 60, 60) if full else (255, 130, 100)
+            label_color = (255, 120, 120)
+            text = "離すとシャットダウンを実行" if full else "そのまま押し続けて実行…"
+        else:
+            fill_color = (120, 220, 140) if full else (255, 210, 120)
+            label_color = (150, 235, 170) if full else (255, 255, 255)
+            text = "離すと決定" if full else "そのまま押し続けて決定…"
+
+        label = self._menu_gauge_label(text, label_color)
+        self.canvas.blit(label, (w // 2 - label.get_width() // 2,
+                                  bar_rect.y - label.get_height() - m["label_gap"]))
+        pygame.draw.rect(self.canvas, (60, 60, 72), bar_rect, border_radius=bar_h // 2)
+        fill_w = int(bar_rect.width * progress)
+        if fill_w > 0:
+            pygame.draw.rect(self.canvas, fill_color,
+                             pygame.Rect(bar_rect.x, bar_rect.y, fill_w, bar_rect.height),
+                             border_radius=bar_h // 2)
 
     def toggle_qr_code(self):
         """QR表示中にもう一度押されたら即座に消す。非表示中なら新たに表示する。
@@ -1242,16 +1460,15 @@ class PopSignage:
         まで表示時間の上限なく出続けるべきものなので、あえて別の独立した
         仕組みにしている。デジタルサイネージ本来の役割（スライドショー表示）を
         妨げないよう、画面を占有せず控えめな帯だけにとどめる。
-        ボタン長押し中はdraw_button_hold_overlayの方で進捗を見せるので、
-        二重表示を避けるためここでは何も描かない。
         適用処理が既に確定・進行中(_usb_update_applying)の間は
         draw_usb_update_applying_screenが画面を専有するので、こちらは呼ばれない
-        （run()側の分岐で切り替えている）。"""
-        if not self.usb_update_pending or self._button_press_start is not None:
+        （run()側の分岐で切り替えている）。メニュー表示中も専有画面になるため
+        呼ばれない。"""
+        if not self.usb_update_pending:
             return
 
         version = self.usb_update_pending.get("version", "?")
-        text = f"アップデート待機中 v{version}（本体ボタン{USB_UPDATE_CONFIRM_HOLD_SECONDS}秒長押しで適用）"
+        text = f"アップデート待機中 v{version}（ボタンを押してメニューから適用）"
         font = get_japanese_font(18)
         surf = font.render(text, True, (30, 30, 30))
 
@@ -1461,7 +1678,7 @@ class PopSignage:
     # ---------------- 取扱説明モード ----------------
 
     def toggle_manual(self):
-        """ボタンの中段長押しで、取扱説明の表示/非表示をトグルする"""
+        """機能メニューの「取扱説明を見る」で、取扱説明の表示/非表示をトグルする"""
         if self.manual_active:
             self.manual_active = False
             log("取扱説明を非表示にしました")
@@ -1491,7 +1708,7 @@ class PopSignage:
 
     def draw_manual_screen(self):
         """取扱説明の現在のページを描画し、一定時間ごとに自動でページ送りする。
-        （写真が1枚も無い時の自動表示、ボタン長押しでの手動表示、両方から呼ばれる）
+        （写真が1枚も無い時の自動表示、メニューからの手動表示、両方から呼ばれる）
         ページ内容（タイトル・本文・フッター）のレンダリング結果はキャッシュし、
         ページが切り替わった時（またはキャンバスサイズが変わった時）だけ再描画する。
         毎フレーム日本語テキストを描き直すのは、非力なPi Zero 2Wには重すぎるため。"""
@@ -1562,7 +1779,7 @@ class PopSignage:
     # ---------------- Wi-Fiセットアップモード ----------------
 
     def enter_wifi_setup_mode(self):
-        """ボタン長押しで呼ばれる。接続情報（QR・SSID・パスワード）の画面を表示する。
+        """機能メニューの「Wi-Fiセットアップ」で呼ばれる。接続情報（QR・SSID・パスワード）の画面を表示する。
         既にスタンドアロンモードでアクセスポイントが常時起動済みの場合は、
         新たに立て直さず、その情報をそのまま表示するだけにする。"""
         if self.wifi_setup_active:
@@ -1638,7 +1855,7 @@ class PopSignage:
         self.wifi_setup_ssid = ssid
         self.wifi_setup_password = password
         self._build_wifi_setup_surfaces()
-        log("スタンドアロンモードで待機中（画面は通常表示のまま、ボタン長押しで接続情報を表示できます）")
+        log("スタンドアロンモードで待機中（画面は通常表示のまま、ボタンを押してメニューから接続情報を表示できます）")
 
     def _make_qr_surface(self, payload, size):
         """任意の文字列からQRコードのSurfaceを生成する共通ヘルパー"""
@@ -1852,6 +2069,10 @@ class PopSignage:
                         if event.key == pygame.K_ESCAPE:
                             pygame.quit()
                             sys.exit()
+                        if event.key == pygame.K_SPACE:
+                            # Mac等、GPIOボタンが無い環境でのボタン代用
+                            # （押している間がボタン押下。離した時にKEYUP側で処理する）
+                            self._emulated_button_down()
                         if event.key == pygame.K_q:
                             # Mac等、GPIOボタンが無い環境での動作確認用
                             self.toggle_qr_code()
@@ -1883,14 +2104,19 @@ class PopSignage:
                         # 開始し、一致しなければ「未割り当てのキー」として記録して
                         # Web設定画面での割り当て作業を補助する（詳細はconfig.pyの
                         # CALL_DISPLAY_*のコメント、signage_state.save_last_detected_key）。
-                        if event.key not in (pygame.K_ESCAPE, pygame.K_q, pygame.K_m,
-                                             pygame.K_w, pygame.K_r, pygame.K_s, pygame.K_e):
+                        emulated_space = (event.key == pygame.K_SPACE and self._qr_button is None)
+                        if not emulated_space and event.key not in (
+                                pygame.K_ESCAPE, pygame.K_q, pygame.K_m,
+                                pygame.K_w, pygame.K_r, pygame.K_s, pygame.K_e):
                             if not self._handle_call_button_key(event.key):
                                 try:
                                     key_name = pygame.key.name(event.key)
                                 except Exception:
                                     key_name = str(event.key)
                                 save_last_detected_key(IMAGE_FOLDER, event.key, key_name)
+                    if event.type == pygame.KEYUP and event.key == pygame.K_SPACE:
+                        # Mac等、GPIOボタンが無い環境でのボタン代用（離した時の処理）
+                        self._emulated_button_up()
 
                 self._poll_button()
 
@@ -1956,7 +2182,7 @@ class PopSignage:
                             log(f"USBアップデートパッケージを検出しました: "
                                 f"v{self.usb_update_pending.get('version')}"
                                 f"（現在v{self.usb_update_pending.get('current_version')}）。"
-                                f"本体ボタンを{USB_UPDATE_CONFIRM_HOLD_SECONDS}秒以上"
+                                f"本体ボタンを押して、メニューの「USBアップデートを適用」を"
                                 f"長押しすると適用します")
 
                     # USB書き出し（吸い出し）機能：待受け中に、別プロセス
@@ -2000,6 +2226,13 @@ class PopSignage:
                 if self.call_active and now - self.call_start_time >= self.call_duration:
                     self._exit_call_display()
 
+                # 機能メニューを開いたまま放置された場合は、自動的に通常画面へ戻る
+                # （ボタンを押している最中はタイムアウトさせない。サイネージが
+                # 止まったままになることを防ぐための保険）
+                if (self.menu_active and self._button_press_start is None
+                        and now - self.menu_last_input_time >= MENU_TIMEOUT_SECONDS):
+                    self._close_menu("無操作のためタイムアウト")
+
                 # 知っているWi-Fiが見つからない場合、自動的にスタンドアロンモードへ移行する。
                 # 起動直後は少し待ってから最初の判定を行い、以後は定期的に再判定する
                 # （途中でWi-Fi接続が切れた場合の検知も兼ねる）。
@@ -2015,7 +2248,7 @@ class PopSignage:
                     # 他の何よりも優先してこの専有画面を出し続ける
                     self.draw_shutdown_screen()
                 elif self._usb_update_applying:
-                    # USBアップデートの適用処理が進行中（ボタン長押しで確定済み、
+                    # USBアップデートの適用処理が進行中（メニューで確定済み、
                     # まだサービス再起動前）。他の何より優先して専有画面を出し続け、
                     # スライドショーや古い通知・バッジが再表示されて
                     # 「失敗したのでは」と誤解されることのないようにする
@@ -2026,11 +2259,14 @@ class PopSignage:
                     # （_trigger_call_display側でそれらは既に終了させているが、
                     # 念のためここでも優先順位を明示している）
                     self.draw_call_screen()
+                elif self.menu_active:
+                    # 機能メニュー。スライドショーを止めて専有画面にする
+                    # （_open_menu側で止めていた時間分を、閉じる時に巻き戻す）
+                    self.draw_menu_screen()
                 elif self.wifi_setup_active:
                     self.draw_wifi_setup_screen()
                 elif self.manual_active:
                     self.draw_manual_screen()
-                    self.draw_button_hold_overlay()
                 elif self.export_standby_active:
                     self.draw_export_standby_screen()
                 elif self._fullscreen_notice_active:
@@ -2046,7 +2282,6 @@ class PopSignage:
                         self.draw_qr_overlay()
                     self.draw_usb_update_badge()
                     self.draw_notice_overlay()
-                    self.draw_button_hold_overlay()
 
                 if ROTATE_SCREEN:
                     # pygame.transform.rotateは反時計回りが正の角度なので、
