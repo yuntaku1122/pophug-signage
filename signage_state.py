@@ -377,6 +377,15 @@ def validate_settings_updates(raw_values):
         else:
             errors.append(("setup_ap_password", "空、または8〜63文字で指定してください"))
 
+    # クイズモード（v4.46.0〜）の設定。検証の実体はquiz_engineにある
+    # （quiz_engineがこのモジュールをimportするため、循環を避けて関数内でimportする）
+    import quiz_engine
+    quiz_raw = {k: raw_values[k] for k in quiz_engine.QUIZ_SETTING_KEYS if k in raw_values}
+    if quiz_raw:
+        quiz_valid, quiz_errors = quiz_engine.validate_quiz_settings(quiz_raw)
+        valid.update(quiz_valid)
+        errors.extend(quiz_errors)
+
     return valid, errors
 
 

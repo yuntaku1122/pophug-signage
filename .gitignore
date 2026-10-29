@@ -11,3 +11,6 @@ images/.hidden.json
 
 images/
 pophug-signage-*.zip
+
+# クイズモードの問題・画像・集計（購入者ごとの実行時データのため管理対象外）
+quiz_data/

@@ -266,6 +266,12 @@ UPLOAD_PAGE = """
     <p style="font-size:12px;color:#999;">現在 __COUNT__ 枚登録 / うち __VISIBLE_COUNT__ 枚を表示中</p>
   </div>
 
+  <div class="box" style="margin-top:16px;">
+    <h1>クイズ</h1>
+    <p class="hint" style="margin:0 0 12px;">押しボタン2個で答える2択クイズを、同じ本体で楽しめます。</p>
+    <a href="/quiz" style="display:block; text-align:center; padding:14px; background:#555; color:#fff; border-radius:8px; text-decoration:none; font-size:16px;">クイズの問題を登録・管理する</a>
+  </div>
+
   <h2>画像一覧</h2>
   <p class="hint">スイッチON＝サイネージに表示中。切り替えると即座に保存され、サイネージには最大__RESCAN_SEC__秒で反映されます。</p>
   <div class="gallery">
@@ -2053,6 +2059,14 @@ def create_app(image_folder):
     app = Flask(__name__)
     os.makedirs(image_folder, exist_ok=True)
     supported = ('.jpg', '.jpeg', '.png')
+
+    # 2択クイズモードの管理画面（/quiz）とAPI（v4.46.0〜）。別ファイルに分けてあり、
+    # 無くても（古い構成でも）ここ以外の機能は動く
+    try:
+        from quiz_web import register_quiz_routes
+        register_quiz_routes(app, image_folder)
+    except ImportError:
+        pass
 
     def list_images():
         return sorted(f for f in os.listdir(image_folder) if f.lower().endswith(supported))

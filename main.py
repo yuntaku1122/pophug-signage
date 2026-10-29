@@ -25,6 +25,8 @@ from signage_state import (load_hidden, hidden_mtime, load_settings, settings_mt
                             clear_export_standby, export_standby_mtime,
                             save_last_detected_key, load_call_buttons)
 from version import __version__
+from quiz_engine import get_shared_store, QuizSession, QUIZ_DEFAULTS
+from quiz_screen import QuizScreen
 import wifi_setup
 import sd_watchdog
 import update_check
@@ -237,6 +239,19 @@ class PopSignage:
         self.call_surface = None
         self._last_call_trigger_time = {}
 
+        # 2択クイズモード（v4.46.0〜）。機能メニューから入り、スライドショーの代わりに
+        # クイズ画面を専有表示する。状態遷移は quiz_engine、描画は quiz_screen が担当する。
+        self.quiz_active = False
+        self.quiz_store = get_shared_store(QUIZ_DATA_FOLDER)   # Webサーバーと同じインスタンスを共有する
+        self.quiz_session = None
+        self.quiz_screen = QuizScreen(get_japanese_font, QUIZ_DATA_FOLDER)
+        self._quiz_keys = (QUIZ_KEY_A_DEFAULT, QUIZ_KEY_B_DEFAULT)
+        self._quiz_keys_down = {}        # キーコード -> [押し始めた時刻, 長押しリセット済みか]
+        self._quiz_last_draw = 0         # 最後にクイズ画面を描いた時刻（隠れていた時間の補正用）
+        self._quiz_pause_start = 0       # クイズモードに入った（スライドショーを止めた）時刻
+        self._quiz_questions_mtime = None
+        self._quiz_last_flush = 0
+
         self.load_pop_images(initial=True)
 
         if UPLOAD_ENABLED:
@@ -308,6 +323,8 @@ class PopSignage:
             globals()["ROTATE_SCREEN"] = new_rotation
             log(f"画面回転を更新: {new_rotation}度")
             self._rebuild_canvas()
+
+        self._refresh_quiz_settings()
 
     def _rebuild_canvas(self):
         """ROTATE_SCREENの変更を受けて、描画キャンバスを作り直す。
@@ -789,7 +806,15 @@ class PopSignage:
     def _build_menu_items(self):
         """今の状態に応じたメニュー項目の一覧を作る。[(id, 表示ラベル), ...]
         USBアップデートの項目は、確定待ちのパッケージがある時だけ表示する。"""
-        items = [
+        items = []
+        if self.quiz_active:
+            items += [
+                ("quiz_reset", "クイズを最初からやり直す"),
+                ("quiz_exit", "サイネージに戻る"),
+            ]
+        elif self.quiz_store.has_questions():
+            items.append(("quiz", "クイズモードへ"))
+        items += [
             ("qr", "QRコードを表示（写真を送る）"),
             ("manual", "取扱説明を見る"),
             ("wifi", "Wi-Fiセットアップ"),
@@ -809,6 +834,8 @@ class PopSignage:
     def _open_menu(self):
         """機能メニューを開く。メニュー表示中はスライドショーを止めて専有画面にする。"""
         self._hide_qr()
+        if self.quiz_active:
+            self.quiz_store.flush()   # 店主が操作する区切りで、未保存の回答集計を書き出す
         self.menu_items = self._build_menu_items()
         self.menu_index = 0
         self.menu_confirm = None
@@ -825,9 +852,10 @@ class PopSignage:
         if not self.menu_active:
             return
         paused = time.time() - self._menu_pause_start
-        self.pop_start_time += paused
-        if self.in_transition:
-            self.transition_start_time += paused
+        if not self.quiz_active:   # クイズ中はスライドショーが止まっている（モード切替側で巻き戻す）
+            self.pop_start_time += paused
+            if self.in_transition:
+                self.transition_start_time += paused
         self.menu_active = False
         self.menu_confirm = None
         self._menu_render_cache = {"key": None, "surface": None}
@@ -886,6 +914,13 @@ class PopSignage:
             self._enter_export_standby()
         elif item_id == "reset":
             self._reset_display_to_pinned_only()
+        elif item_id == "quiz":
+            self.enter_quiz_mode()
+        elif item_id == "quiz_exit":
+            self.exit_quiz_mode()
+        elif item_id == "quiz_reset":
+            if self.quiz_session:
+                self.quiz_session.hold_reset(time.time())
         # "close" は閉じるだけ（上でメニューは閉じ済み）
 
     def _reset_display_to_pinned_only(self):
@@ -1105,6 +1140,144 @@ class PopSignage:
         self.call_duration = duration
         self.call_surface = surf
         log(f"呼び出し表示を開始しました（{label}、{filename}、{duration}秒間）")
+
+    # ---------------- 2択クイズモード ----------------
+
+    def _refresh_quiz_settings(self):
+        """images/.settings.json のクイズ関連設定を、実行中のクイズに反映する。
+        A・Bのキーは、Web設定画面で割り当て済みならそれを、未割り当てなら既定値を使う。"""
+        settings = load_settings(IMAGE_FOLDER, dict(QUIZ_DEFAULTS,
+                                                    quiz_key_a=QUIZ_KEY_A_DEFAULT,
+                                                    quiz_key_b=QUIZ_KEY_B_DEFAULT))
+        try:
+            key_a = int(settings.get("quiz_key_a") or QUIZ_KEY_A_DEFAULT)
+            key_b = int(settings.get("quiz_key_b") or QUIZ_KEY_B_DEFAULT)
+        except (TypeError, ValueError):
+            key_a, key_b = QUIZ_KEY_A_DEFAULT, QUIZ_KEY_B_DEFAULT
+        self._quiz_keys = (key_a, key_b)
+        session = getattr(self, "quiz_session", None)
+        if session is not None:
+            session.settings.update({k: settings[k] for k in QUIZ_DEFAULTS})
+
+    def enter_quiz_mode(self):
+        """クイズモードに入る。スライドショーは止まり、出題は最初のラウンドから始まる。"""
+        if self.quiz_active or not self.quiz_store.has_questions():
+            return
+        now = time.time()
+        self._hide_qr()
+        # メモリ節約：スライドショーの先読み画像を解放する（固定表示分は残す。
+        # 戻った時に必要な分は_ensure_window_cached()が少しずつ読み直す）
+        with self._lock:
+            self._window_cache = {}
+        self.quiz_session = QuizSession(self.quiz_store, now=now)
+        self._refresh_quiz_settings()
+        self._quiz_keys_down = {}
+        self._quiz_last_draw = now
+        self._quiz_pause_start = now
+        self._quiz_questions_mtime = self._quiz_file_mtime()
+        self._quiz_last_flush = now
+        self.quiz_active = True
+        log("クイズモードに入りました")
+
+    def exit_quiz_mode(self):
+        """サイネージに戻る。止まっていた時間分だけスライドショーのタイマーを巻き戻す。"""
+        if not self.quiz_active:
+            return
+        self.quiz_store.flush()
+        paused = time.time() - self._quiz_pause_start
+        self.pop_start_time += paused
+        if self.in_transition:
+            self.transition_start_time += paused
+        self.quiz_active = False
+        self.quiz_session = None
+        self._quiz_keys_down = {}
+        log("クイズモードを終了し、サイネージに戻りました")
+
+    def _quiz_file_mtime(self):
+        try:
+            return os.path.getmtime(self.quiz_store._qpath())
+        except OSError:
+            return None
+
+    def _quiz_choice_of(self, key):
+        """キーコードがクイズのA(0)・B(1)なら番号を、そうでなければNoneを返す。"""
+        if key == self._quiz_keys[0]:
+            return 0
+        if key == self._quiz_keys[1]:
+            return 1
+        return None
+
+    def _quiz_visible(self, now):
+        """クイズ画面が今まさに表示されているか（メニュー等に隠れている間のボタンは無視する）。"""
+        return (self.quiz_session is not None and not self.menu_active
+                and now - self._quiz_last_draw < 0.3)
+
+    def _quiz_keydown(self, key):
+        """クイズのA・Bボタンが押された。処理した（または意図的に無視した）場合はTrue。
+        QUIZ_LONG_PRESS_ENABLED時は、離した時に回答として扱う（長押しと区別するため）。"""
+        choice = self._quiz_choice_of(key)
+        if choice is None:
+            return False
+        now = time.time()
+        if not self._quiz_visible(now):
+            return True
+        if QUIZ_LONG_PRESS_ENABLED:
+            self._quiz_keys_down.setdefault(key, [now, False])
+        else:
+            self.quiz_session.press(choice, now)
+        return True
+
+    def _quiz_keyup(self, key):
+        choice = self._quiz_choice_of(key)
+        if choice is None:
+            return False
+        entry = self._quiz_keys_down.pop(key, None)
+        now = time.time()
+        if entry and not entry[1] and self._quiz_visible(now):
+            self.quiz_session.press(choice, now)   # 短押し=回答／次へ（長押しリセット済みなら何もしない）
+        return True
+
+    def draw_quiz_screen(self, now):
+        """クイズ画面の毎フレーム処理：時間経過の反映・長押しリセットの監視・描画。"""
+        session = self.quiz_session
+        # 他の画面（メニュー・取扱説明等）に隠れていた間は、無操作タイマーを止めておく
+        gap = now - self._quiz_last_draw
+        if gap > 0.5:
+            session.shift_time(gap)
+            self._quiz_keys_down = {}
+        self._quiz_last_draw = now
+
+        # Webで問題が編集されていたら、最初から読み直す
+        if now - getattr(self, "_quiz_mtime_check", 0) >= 3:
+            self._quiz_mtime_check = now
+            mt = self._quiz_file_mtime()
+            if mt != self._quiz_questions_mtime:
+                self._quiz_questions_mtime = mt
+                session.reload(now)
+                log("クイズの問題が更新されたため、最初から読み直しました")
+        if now - self._quiz_last_flush >= 60:
+            self._quiz_last_flush = now
+            self.quiz_store.flush()
+
+        session.tick(now)
+
+        hold = session.settings["quiz_hold_reset_seconds"]
+        start = min(QUIZ_GAUGE_START_SECONDS, hold * 0.4)
+        gauge = None
+        for key, entry in list(self._quiz_keys_down.items()):
+            if entry[1]:
+                continue
+            held = now - entry[0]
+            if held >= hold:
+                entry[1] = True
+                session.hold_reset(now)
+                log("クイズを最初からやり直しました（ボタン長押し）")
+                gauge = None
+                break
+            if held >= start:
+                gauge = max(gauge or 0.0, (held - start) / max(0.01, hold - start))
+
+        self.quiz_screen.draw(self.canvas, session, now, gauge)
 
     def _exit_call_display(self):
         """呼び出し表示を終了し、通常のスライドショーへ戻す
@@ -2063,12 +2236,25 @@ class PopSignage:
             while True:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
+                        self.quiz_store.flush()
                         pygame.quit()
                         sys.exit()
+                    if event.type == pygame.KEYUP and self.quiz_active and self._quiz_keyup(event.key):
+                        continue
                     if event.type == pygame.KEYDOWN:
                         if event.key == pygame.K_ESCAPE:
+                            self.quiz_store.flush()
                             pygame.quit()
                             sys.exit()
+                        # クイズモード中のA・Bボタンは、他の機能（呼び出し表示等）より先に処理する
+                        if self.quiz_active and self._quiz_keydown(event.key):
+                            continue
+                        if event.key == pygame.K_z:
+                            # Mac等、GPIOボタンが無い環境でのクイズモード切替確認用
+                            if self.quiz_active:
+                                self.exit_quiz_mode()
+                            elif self.quiz_store.has_questions():
+                                self.enter_quiz_mode()
                         if event.key == pygame.K_SPACE:
                             # Mac等、GPIOボタンが無い環境でのボタン代用
                             # （押している間がボタン押下。離した時にKEYUP側で処理する）
@@ -2107,8 +2293,10 @@ class PopSignage:
                         emulated_space = (event.key == pygame.K_SPACE and self._qr_button is None)
                         if not emulated_space and event.key not in (
                                 pygame.K_ESCAPE, pygame.K_q, pygame.K_m,
-                                pygame.K_w, pygame.K_r, pygame.K_s, pygame.K_e):
-                            if not self._handle_call_button_key(event.key):
+                                pygame.K_w, pygame.K_r, pygame.K_s, pygame.K_e, pygame.K_z):
+                            # クイズモード中は呼び出し表示を起こさず、未割り当てキーの記録だけ行う
+                            # （Web設定画面でA・Bに割り当てる作業を補助するため）
+                            if self.quiz_active or not self._handle_call_button_key(event.key):
                                 try:
                                     key_name = pygame.key.name(event.key)
                                 except Exception:
@@ -2276,6 +2464,11 @@ class PopSignage:
                     # （それらは明示的にユーザーが呼び出した操作のため優先させる）。
                     # USBメモリーが抜かれるまで表示され続ける
                     self.draw_fullscreen_notice()
+                elif self.quiz_active:
+                    self.draw_quiz_screen(now)
+                    if self.qr_active:
+                        self.draw_qr_overlay()
+                    self.draw_notice_overlay()
                 else:
                     self.draw_pop_mode()
                     if self.qr_active:
@@ -2304,6 +2497,7 @@ class PopSignage:
                     sd_watchdog.notify_alive()
         except KeyboardInterrupt:
             log("Ctrl+Cを検知、終了します")
+            self.quiz_store.flush()
             sd_watchdog.notify_stopping()
             pygame.quit()
             sys.exit(0)

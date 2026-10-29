@@ -39,7 +39,7 @@ HISTORY_PATH = os.path.join(APP_DIR, "images", ".update_history.json")
 HISTORY_MAX_ENTRIES = 10  # 直近何件まで保持するか（無制限に増やさないための上限）
 
 # 更新時に上書きしない（お客さんごとのデータ・環境なので温存する）もの
-PRESERVE = {"images", "venv", ".git", "__pycache__"}
+PRESERVE = {"images", "quiz_data", "venv", ".git", "__pycache__"}  # quiz_data: クイズの問題・画像・集計（購入者ごとのデータ）
 
 
 def log(msg):
