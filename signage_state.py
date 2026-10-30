@@ -812,6 +812,18 @@ def update_call_button(image_folder, button_id, **fields):
             break
     if not found:
         return False
+    # 同じキーが複数のボタンに割り当てられると、どれが反応するか分からなくなる。
+    # 新しく割り当てたキーは、他のボタンから外して「付け替え（移動）」にする。
+    new_key = fields.get("key")
+    if new_key:
+        for b in buttons:
+            if b.get("id") != button_id:
+                try:
+                    other = int(b.get("key", 0) or 0)
+                except (TypeError, ValueError):
+                    other = 0
+                if other == new_key:
+                    b["key"] = 0
     save_call_buttons(image_folder, buttons)
     return True
 

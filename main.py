@@ -2296,12 +2296,17 @@ class PopSignage:
                                 pygame.K_w, pygame.K_r, pygame.K_s, pygame.K_e, pygame.K_z):
                             # クイズモード中は呼び出し表示を起こさず、未割り当てキーの記録だけ行う
                             # （Web設定画面でA・Bに割り当てる作業を補助するため）
-                            if self.quiz_active or not self._handle_call_button_key(event.key):
-                                try:
-                                    key_name = pygame.key.name(event.key)
-                                except Exception:
-                                    key_name = str(event.key)
-                                save_last_detected_key(IMAGE_FOLDER, event.key, key_name)
+                            if not self.quiz_active:
+                                self._handle_call_button_key(event.key)
+                            # 【v4.47.2】割り当て済みのキーも含め、押されたキーは常に
+                            # 「最後に検出されたキー」として記録する。以前は割り当て済みのキーを
+                            # 記録しなかったため、すでに使っているキーを別のボタンへ付け替えたい時に
+                            # Web画面へ表示されず、ボタンを削除して作り直すしかなかった。
+                            try:
+                                key_name = pygame.key.name(event.key)
+                            except Exception:
+                                key_name = str(event.key)
+                            save_last_detected_key(IMAGE_FOLDER, event.key, key_name)
                     if event.type == pygame.KEYUP and event.key == pygame.K_SPACE:
                         # Mac等、GPIOボタンが無い環境でのボタン代用（離した時の処理）
                         self._emulated_button_up()

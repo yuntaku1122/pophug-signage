@@ -436,8 +436,10 @@ UPLOAD_PAGE = """
         <strong id="last-key-label">まだありません</strong></label>
       <p class="hint" style="margin:6px 0 0;">
         割り当てたいボタンを一度押してから、下の各ボタンにある
-        「検出したキーを割り当てる」で割り当ててください
-        （割り当て済みのキーが押された場合はここには表示されません）。
+        「検出したキーを割り当てる」で割り当ててください。
+        すでに使っているキーを押した場合も、ここに表示されます（別のボタンへ付け替えられます。
+        同じキーは1つのボタンにだけ割り当てられ、付け替えると元のボタンは「未設定」になります）。
+        割り当てを外したい時は、各ボタンの「クリア」を押してください。
       </p>
     </div>
 
@@ -455,6 +457,17 @@ UPLOAD_PAGE = """
     var lastKeyCode = null;
     var buttonsList = document.getElementById('call-buttons-list');
 
+    // 検出したキーが、すでにどれかのボタンに割り当て済みなら、その名前を添える
+    function assignedNote(code) {
+      var cards = buttonsList.querySelectorAll('.call-button-card');
+      for (var i = 0; i < cards.length; i++) {
+        if (cards[i].querySelector('.call-btn-key-label').textContent === String(code)) {
+          return '　※「' + cards[i].querySelector('.call-btn-label').textContent + '」に割り当て済み';
+        }
+      }
+      return '';
+    }
+
     function refreshLastKey() {
       fetch('/last-detected-key', { headers: { 'Accept': 'application/json' } })
         .then(function (r) { return r.json(); })
@@ -462,7 +475,7 @@ UPLOAD_PAGE = """
           var assignBtns = buttonsList.querySelectorAll('.call-btn-assign-key-btn');
           if (data && data.key_code) {
             lastKeyCode = data.key_code;
-            lastKeyLabel.textContent = data.key_name + '（コード: ' + data.key_code + '）';
+            lastKeyLabel.textContent = data.key_name + '（コード: ' + data.key_code + '）' + assignedNote(data.key_code);
             assignBtns.forEach(function (b) { b.disabled = false; });
           } else {
             lastKeyCode = null;
@@ -570,11 +583,43 @@ UPLOAD_PAGE = """
         })
           .then(function (r) { return r.json(); })
           .then(function () {
-            status.textContent = '割り当てました';
+            var moved = [];
+            buttonsList.querySelectorAll('.call-button-card').forEach(function (other) {
+              var lab = other.querySelector('.call-btn-key-label');
+              if (other !== card && lab.textContent === String(lastKeyCode)) {
+                lab.textContent = '未設定';
+                moved.push(other.querySelector('.call-btn-label').textContent);
+              }
+            });
+            status.textContent = moved.length
+              ? '割り当てました（「' + moved.join('」「') + '」から付け替えました）'
+              : '割り当てました';
             card.querySelector('.call-btn-key-label').textContent = lastKeyCode;
           })
           .catch(function () { status.textContent = '割り当てに失敗しました'; })
           .finally(function () { assignBtn.disabled = false; });
+        return;
+      }
+
+      if (e.target.closest('.call-btn-clear-key-btn')) {
+        var clearBtn = e.target.closest('.call-btn-clear-key-btn');
+        clearBtn.disabled = true;
+        status.textContent = 'クリアしています…';
+        fetch('/call-buttons/' + encodeURIComponent(buttonId) + '/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+          body: 'key=0'
+        })
+          .then(function (r) {
+            if (!r.ok) { throw new Error('failed'); }
+            return r.json();
+          })
+          .then(function () {
+            status.textContent = 'キーの割り当てをクリアしました';
+            card.querySelector('.call-btn-key-label').textContent = '未設定';
+          })
+          .catch(function () { status.textContent = 'クリアに失敗しました'; })
+          .finally(function () { clearBtn.disabled = false; });
         return;
       }
 
@@ -1605,6 +1650,8 @@ def render_call_buttons_list(buttons):
         割り当て済みのキー: <strong class="call-btn-key-label">{key_label}</strong>
         <button type="button" class="call-btn-assign-key-btn" disabled
                 style="width:auto; margin-left:8px; font-size:12px; padding:4px 8px; white-space:nowrap;">検出したキーを割り当てる</button>
+        <button type="button" class="call-btn-clear-key-btn"
+                style="width:auto; margin-left:4px; background:#999; font-size:12px; padding:4px 8px; white-space:nowrap;">クリア</button>
       </p>
       <label style="margin-top:10px; display:block;">表示する秒数
         <span class="call-btn-duration-value">{duration}</span>秒</label>
