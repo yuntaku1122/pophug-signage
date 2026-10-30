@@ -487,8 +487,8 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
   <h2>A・Bボタンの割り当て</h2>
   <div class="box">
     <p class="hint">お使いの押しボタンが、AとBのどちらかを決めます。クイズモード中にボタンを押すと、下に「最後に検出されたキー」が表示されるので、AかBに割り当ててください（呼び出し表示ボタンと同じキーを使うこともできます）。</p>
-    <div class="key-now" id="key-a-now"></div>
-    <div class="key-now" id="key-b-now"></div>
+    <div class="key-now row"><span id="key-a-now"></span><button type="button" id="clear-a" class="btn-small btn-danger">Aをクリア</button></div>
+    <div class="key-now row"><span id="key-b-now"></span><button type="button" id="clear-b" class="btn-small btn-danger">Bをクリア</button></div>
     <div class="detected-box">
       <div class="stats-text">最後に検出されたキー</div>
       <div id="detected-key" style="font-size:16px; margin:4px 0;">（まだ検出されていません）</div>
@@ -499,7 +499,7 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
     </div>
     <div id="call-key-list"></div>
     <div class="row" style="margin-top:8px;">
-      <button type="button" id="reset-keys" class="btn-small btn-sub">既定（A=F・B=J）に戻す</button>
+      <button type="button" id="reset-keys" class="btn-small btn-sub">A・Bとも既定（A=F・B=J）に戻す</button>
     </div>
     <p class="status" id="key-status"></p>
   </div>
@@ -747,6 +747,8 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
       var s = state.settings;
       $('key-a-now').textContent = 'A：' + keyLabel(s.quiz_key_a, s.quiz_key_a_name, 'F');
       $('key-b-now').textContent = 'B：' + keyLabel(s.quiz_key_b, s.quiz_key_b_name, 'J');
+      $('clear-a').disabled = !s.quiz_key_a;
+      $('clear-b').disabled = !s.quiz_key_b;
       var box = $('call-key-list');
       box.textContent = '';
       if (state.call_buttons.length) {
@@ -771,6 +773,13 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
       body['quiz_key_' + which] = code;
       body['quiz_key_' + which + '_name'] = name;
       try { await api('/quiz/api/settings', body); await load(); setStatus('key-status', which.toUpperCase() + 'に割り当てました'); }
+      catch (e) { setStatus('key-status', e.message, true); }
+    }
+    async function clearKey(which) {
+      var body = {};
+      body['quiz_key_' + which] = 0;
+      body['quiz_key_' + which + '_name'] = '';
+      try { await api('/quiz/api/settings', body); await load(); setStatus('key-status', which.toUpperCase() + 'の割り当てをクリアしました（未設定の間は既定のキーが使われます）'); }
       catch (e) { setStatus('key-status', e.message, true); }
     }
     async function pollDetected() {
@@ -825,6 +834,8 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
     $('save-settings').addEventListener('click', saveSettings);
     $('assign-a').addEventListener('click', function () { assignKey('a', detected.key_code, detected.key_name || ''); });
     $('assign-b').addEventListener('click', function () { assignKey('b', detected.key_code, detected.key_name || ''); });
+    $('clear-a').addEventListener('click', function () { clearKey('a'); });
+    $('clear-b').addEventListener('click', function () { clearKey('b'); });
     $('reset-keys').addEventListener('click', async function () {
       try { await api('/quiz/api/settings', { quiz_key_a: 0, quiz_key_b: 0, quiz_key_a_name: '', quiz_key_b_name: '' }); await load(); setStatus('key-status', '既定に戻しました'); }
       catch (e) { setStatus('key-status', e.message, true); }
