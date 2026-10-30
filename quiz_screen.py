@@ -179,18 +179,23 @@ class QuizScreen:
         q = session.current
         landscape = w >= h
         gap = m
-        qh = int(bh * (0.50 if landscape else 0.38))
+        # 選択肢A・Bの枠は、結果画面のA/B行と同じくらいの大きさに抑え、
+        # 残りの領域を問題文（画像）に使う（枠が大きすぎると問題が窮屈になるため）
+        if landscape:
+            ph = int(bh * 0.31)
+            qh = bh - ph - gap
+        else:
+            ph = int(bh * 0.17)
+            qh = bh - 2 * ph - 2 * gap
         pygame.draw.rect(surf, PANEL_BG, (bx, by, bw, qh), border_radius=m)
         pad = m
         self._draw_part(surf, (bx + pad, by + pad, bw - 2 * pad, qh - 2 * pad), q["question"],
                         max_size=int(h * 0.12), vertical_split=landscape)
         cy = by + qh + gap
-        ch = bh - qh - gap
         if landscape:
             pw = (bw - gap) // 2
-            rects = [(bx, cy, pw, ch), (bx + pw + gap, cy, pw, ch)]
+            rects = [(bx, cy, pw, ph), (bx + pw + gap, cy, pw, ph)]
         else:
-            ph = (ch - gap) // 2
             rects = [(bx, cy, bw, ph), (bx, cy + ph + gap, bw, ph)]
         for i, (rx, ry, rw, rh) in enumerate(rects):
             pygame.draw.rect(surf, CHOICE_COLORS[i], (rx, ry, rw, rh), border_radius=m)
@@ -198,7 +203,8 @@ class QuizScreen:
             self._badge(surf, rx + pad + d // 2, ry + rh // 2, d, CHOICE_LETTERS[i], (255, 255, 255), CHOICE_COLORS[i])
             cx0 = rx + pad * 2 + d
             self._draw_part(surf, (cx0, ry + pad, rx + rw - pad - cx0, rh - 2 * pad), q["choices"][i],
-                            max_size=int(h * 0.09), color=(255, 255, 255), vertical_split=False)
+                            max_size=min(int(h * 0.09), int(rh * 0.42)), color=(255, 255, 255),
+                            vertical_split=False)
 
     def _draw_result(self, surf, w, h, session):
         m, header_h, footer_h, (bx, by, bw, bh) = self._frame(w, h)
