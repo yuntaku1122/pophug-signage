@@ -232,42 +232,67 @@ class QuizScreen:
         a, b = session.store.get_counts(q["id"])
         pa, pb = session.result_percentages()
         total = a + b
+
+        # 見出し：このバーが「みんなの回答割合」であることを明示する
+        cap_h = max(18, int(h * 0.045))
+        cf = self.get_font(self._quantize(max(14, int(cap_h * 0.8))))
+        cap = "みんなの回答割合" + (f"（{total}人）" if total else "（まだデータなし）")
+        ct = cf.render(cap, True, SUBTEXT)
         rows_y = ly + vh + m
-        note_h = max(14, int(h * 0.05))                 # 「みんなの回答◯人」の行
-        rows_h = lh - vh - m - note_h
+        surf.blit(ct, (lx + m // 2, rows_y + (cap_h - ct.get_height()) // 2))
+        rows_y += cap_h
+        rows_h = lh - vh - m - cap_h
         row_h = (rows_h - m) // 2
+        pad = max(4, m // 2)
+        gap = max(3, pad // 2)
         for i in range(2):
             ry = rows_y + i * (row_h + m)
             is_answer = (q["answer"] == i)
+            is_mine = (session.selected == i)
             pygame.draw.rect(surf, PANEL_BG, (lx, ry, lw, row_h), border_radius=m)
             if is_answer:
                 pygame.draw.rect(surf, OK_COLOR, (lx, ry, lw, row_h), width=max(3, m // 3), border_radius=m)
-            d = max(28, int(row_h * 0.42))
-            self._badge(surf, lx + m + d // 2, ry + row_h // 2 - (row_h // 6), d,
-                        CHOICE_LETTERS[i], CHOICE_COLORS[i])
-            tag = ("正解" if is_answer else "") + ("・あなた" if session.selected == i and is_answer else
-                                                   ("あなた" if session.selected == i else ""))
-            if tag:
-                tf = self.get_font(self._quantize(max(14, int(row_h * 0.2))))
-                surf.blit(tf.render(tag, True, OK_COLOR if is_answer else SUBTEXT),
-                          (lx + m, ry + row_h // 2 + d // 2 - row_h // 6 + 4))
-            cx0 = lx + 2 * m + d
-            pct = pa if i == 0 else pb
-            pf = self.get_font(self._quantize(max(16, int(row_h * 0.34))))
-            pt = pf.render(f"{pct}%", True, TEXT)
-            surf.blit(pt, (lx + lw - m - pt.get_width(), ry + m // 2))
-            self._draw_part(surf, (cx0, ry + m // 2, lx + lw - m - pt.get_width() - m - cx0, int(row_h * 0.5)),
-                            q["choices"][i], max_size=int(row_h * 0.3), vertical_split=False)
-            bar_y = ry + row_h - max(10, int(row_h * 0.2)) - m // 2
+            # 下段=割合バー（バーは行の下端に固定。文字とは重ならない）
+            bar_h = max(10, int(row_h * 0.2))
+            bar_y = ry + row_h - pad - bar_h
+            bar_x = lx + m
             bar_w = lw - 2 * m
-            pygame.draw.rect(surf, (60, 60, 80), (lx + m, bar_y, bar_w, max(10, int(row_h * 0.2))), border_radius=6)
+            # 上段=バッジ・選択肢・タグ・割合（バーより上に収める）
+            l1 = max(20, bar_y - gap - (ry + pad))
+            d = min(l1, int(row_h * 0.5))
+            self._badge(surf, lx + m + d // 2, ry + pad + l1 // 2, d, CHOICE_LETTERS[i], CHOICE_COLORS[i])
+            cx0 = lx + m + d + m
+            pct = pa if i == 0 else pb
+            pf = self.get_font(self._quantize(max(16, int(l1 * 0.8))))
+            pt = pf.render(f"{pct}%", True, TEXT)
+            px = lx + lw - m - pt.get_width()
+            surf.blit(pt, (px, ry + pad + (l1 - pt.get_height()) // 2))
+            # 「あなた」「正解」のタグは割合の左に小さなラベルで並べる
+            tags = []
+            if is_mine:
+                tags.append(("あなた", (255, 255, 255)))
+            if is_answer:
+                tags.append(("正解", OK_COLOR))
+            tgf = self.get_font(self._quantize(max(12, int(l1 * 0.38))))
+            # 狭くて選択肢の文字が潰れそうなら「正解」タグは省く（緑の枠で正解は分かる）
+            need = sum(tgf.size(t)[0] + m + m // 2 for t, _ in tags)
+            if len(tags) > 1 and (px - m // 2 - need) - cx0 < (lx + lw - cx0) * 0.3:
+                tags = [t for t in tags if t[0] != "正解"]
+            tag_x = px - m // 2
+            for label, col in tags:
+                ts = tgf.render(label, True, (14, 18, 30))
+                tw, th = ts.get_width() + m, ts.get_height() + 4
+                tx = tag_x - tw
+                ty = ry + pad + (l1 - th) // 2
+                pygame.draw.rect(surf, col, (tx, ty, tw, th), border_radius=th // 2)
+                surf.blit(ts, (tx + m // 2, ty + 2))
+                tag_x = tx - m // 2
+            self._draw_part(surf, (cx0, ry + pad, tag_x - cx0, l1),
+                            q["choices"][i], max_size=int(l1 * 0.6), vertical_split=False)
+            pygame.draw.rect(surf, (60, 60, 80), (bar_x, bar_y, bar_w, bar_h), border_radius=6)
             if pct:
                 pygame.draw.rect(surf, CHOICE_COLORS[i],
-                                 (lx + m, bar_y, int(bar_w * pct / 100), max(10, int(row_h * 0.2))), border_radius=6)
-        if total:
-            nf = self.get_font(self._quantize(max(12, int(h * 0.04))))
-            nt = nf.render(f"みんなの回答 {total}人", True, SUBTEXT)
-            surf.blit(nt, (lx + lw - nt.get_width(), ly + lh - note_h + (note_h - nt.get_height()) // 2))
+                                 (bar_x, bar_y, max(6, int(bar_w * pct / 100)), bar_h), border_radius=6)
 
         # 右（下）: 解説
         rx, ry, rw, rh = right

@@ -10,6 +10,7 @@
 # アップデートで上書き・削除しない。pophug-update-apply の保護対象に追加すること）。
 # ============================================
 
+import io
 import os
 import random
 import threading
@@ -489,3 +490,157 @@ class QuizSession:
         else:
             self._advance(now, "skipped")
         return True
+
+
+# ============================================
+# 一括取り込み（JSON / CSV）
+# Web側(quiz_web.py)から使う。ここはファイルI/Oや画像保存をしない純粋な解析・検証だけ
+# （単体テストしやすくするため）。画像の実体の取り扱いはquiz_web側が受け持つ。
+# ============================================
+
+import csv as _csv
+import unicodedata as _ud
+
+IMPORT_MAX_BYTES = 30 * 1024 * 1024
+
+# CSVの見出し名（表記ゆれを許す）→ 内部キー
+_CSV_HEADERS = {
+    "question": ("問題", "問題文", "question", "q"),
+    "a": ("a", "選択肢a", "choicea", "a選択肢"),
+    "b": ("b", "選択肢b", "choiceb", "b選択肢"),
+    "answer": ("正解", "答え", "answer", "correct"),
+    "explanation": ("解説", "explanation"),
+    "question_image": ("問題画像", "questionimage", "問題の画像"),
+    "a_image": ("a画像", "選択肢a画像", "aimage", "aの画像"),
+    "b_image": ("b画像", "選択肢b画像", "bimage", "bの画像"),
+    "explanation_image": ("解説画像", "explanationimage", "解説の画像"),
+}
+_CSV_POSITIONAL = ("question", "a", "b", "answer", "explanation")
+CSV_TEMPLATE_HEADER = ["問題", "A", "B", "正解", "解説", "問題画像", "A画像", "B画像", "解説画像"]
+
+
+def _norm_header(h):
+    return _ud.normalize("NFKC", str(h or "")).strip().lower().replace(" ", "").replace("　", "")
+
+
+def decode_text(raw):
+    """UTF-8（BOM付き可）を優先し、だめならShift_JIS(cp932)として読む（Excel保存のCSV対策）。"""
+    for enc in ("utf-8-sig", "cp932"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("文字コードを判別できません。UTF-8で保存し直してください")
+
+
+def parse_answer(value):
+    """A/B・1/2（全角可）を 0/1 に。不正ならNone。"""
+    v = _ud.normalize("NFKC", str(value if value is not None else "")).strip().upper()
+    if v in ("A", "1"):
+        return 0
+    if v in ("B", "2"):
+        return 1
+    return None
+
+
+def parse_import_json(raw):
+    """JSON（問題の配列、または {"questions":[...]}）を問題dictのリストにする。"""
+    try:
+        data = json.loads(decode_text(raw))
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"JSONとして読めませんでした（{e}）")
+    if isinstance(data, dict):
+        data = data.get("questions")
+    if not isinstance(data, list):
+        raise ValueError("問題の配列（[...]）か、{\"questions\": [...]} の形式にしてください")
+    return data
+
+
+def parse_import_csv(raw):
+    """CSVを問題dictのリストにする。1行目が見出しなら見出し名で、無ければ
+    「問題,A,B,正解,解説」の列順で読む。空行は無視する。"""
+    text = decode_text(raw)
+    rows = [r for r in _csv.reader(io.StringIO(text)) if any(c.strip() for c in r)]
+    if not rows:
+        raise ValueError("CSVに行がありません")
+    lookup = {}
+    for key, names in _CSV_HEADERS.items():
+        for n in names:
+            lookup[_norm_header(n)] = key
+    first = [lookup.get(_norm_header(c)) for c in rows[0]]
+    if "question" in first:
+        cols = first
+        body = rows[1:]
+    else:
+        cols = list(_CSV_POSITIONAL)
+        body = rows
+    out = []
+    for r in body:
+        rec = {}
+        for key, cell in zip(cols, r):
+            if key:
+                rec[key] = cell.strip()
+        out.append({
+            "question": {"text": rec.get("question", ""), "image": rec.get("question_image", "")},
+            "choices": [{"text": rec.get("a", ""), "image": rec.get("a_image", "")},
+                        {"text": rec.get("b", ""), "image": rec.get("b_image", "")}],
+            "answer": parse_answer(rec.get("answer")),
+            "explanation": {"text": rec.get("explanation", ""), "image": rec.get("explanation_image", "")},
+        })
+    return out
+
+
+def _too_long(part):
+    return isinstance(part, dict) and len(str(part.get("text") or "").strip()) > MAX_TEXT_LEN
+
+
+def _dup_key(q):
+    return (q["question"].get("text", ""), q["question"].get("image", ""),
+            tuple((c.get("text", ""), c.get("image", "")) for c in q["choices"]), q["answer"])
+
+
+def prepare_import(rows, existing, replace=False, image_exists=None):
+    """取り込み候補(rows)を検証する。ファイルは一切変更しない。
+    戻り値: {"ok": 検証済みの問題リスト, "errors": [(行番号, 理由)], "duplicates": 重複でスキップした数,
+             "total_after": 取り込み後の総問題数}
+    - 1件でも不正があれば呼び出し側は取り込まない（errorsが空の時だけ取り込む）。
+    - IDが既存・他の行と衝突する／無い場合は新しいIDを振る（上書きにはならない）。
+    - 問題文・選択肢・正解がすでに登録済み（または取り込み内で重複）の行は重複としてスキップ。
+    - image_exists(name)がFalseを返す画像名は、その行をエラーにする。"""
+    base = [] if replace else list(existing)
+    used_ids = {q["id"] for q in base}
+    seen = {_dup_key(q) for q in base}
+    ok, errors, dups = [], [], 0
+    for n, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            errors.append((n, "問題の形式が正しくありません"))
+            continue
+        parts = [row.get("question"), row.get("explanation")] + list(row.get("choices") or [])
+        if any(_too_long(p) for p in parts):
+            errors.append((n, f"文字数が長すぎます（1か所あたり{MAX_TEXT_LEN}文字まで）"))
+            continue
+        row = dict(row)
+        if row.get("id") in used_ids:
+            row["id"] = ""
+        cleaned, err = validate_question(row)
+        if err:
+            errors.append((n, err))
+            continue
+        missing = [name for name in question_images(cleaned)
+                   if os.path.basename(name) != name or (image_exists and not image_exists(name))]
+        if missing:
+            errors.append((n, f"画像が見つかりません: {missing[0]}"))
+            continue
+        key = _dup_key(cleaned)
+        if key in seen:
+            dups += 1
+            continue
+        seen.add(key)
+        while cleaned["id"] in used_ids:
+            cleaned["id"] = "q_" + os.urandom(4).hex()
+        used_ids.add(cleaned["id"])
+        ok.append(cleaned)
+    total = len(base) + len(ok)
+    if total > MAX_QUESTIONS:
+        errors.append((0, f"取り込むと{total}問になり、上限の{MAX_QUESTIONS}問を超えます"))
+    return {"ok": ok, "errors": errors, "duplicates": dups, "total_after": total}

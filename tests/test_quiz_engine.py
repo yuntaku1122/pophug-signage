@@ -240,5 +240,57 @@ class RoundTests(unittest.TestCase):
         self.assertEqual(len(err), 3)
 
 
+class ImportTests(unittest.TestCase):
+    def test_parse_answer(self):
+        for v, want in (("A", 0), ("ａ", 0), ("1", 0), ("b", 1), ("Ｂ", 1), ("2", 1), ("C", None), ("", None), (None, None)):
+            self.assertEqual(parse_answer(v), want, v)
+
+    def test_csv_header_and_positional(self):
+        rows = parse_import_csv("問題,A,B,正解,解説\nQ1,あ,い,B,解\n".encode("utf-8-sig"))
+        self.assertEqual(rows[0]["answer"], 1)
+        self.assertEqual(rows[0]["explanation"]["text"], "解")
+        rows = parse_import_csv("Q1,あ,い,A\n\nQ2,う,え,2\n".encode("cp932"))   # 見出し無し・空行・Shift_JIS
+        self.assertEqual([r["answer"] for r in rows], [0, 1])
+        self.assertEqual(rows[1]["question"]["text"], "Q2")
+
+    def test_json_shapes(self):
+        self.assertEqual(parse_import_json(b'[{"a":1}]'), [{"a": 1}])
+        self.assertEqual(parse_import_json(b'{"questions":[{"a":1}]}'), [{"a": 1}])
+        with self.assertRaises(ValueError):
+            parse_import_json(b'{"x":1}')
+        with self.assertRaises(ValueError):
+            parse_import_json(b"{oops")
+
+    def test_prepare_import(self):
+        ex = [mkq(1)]
+        rows = [mkq(1, answer=1), mkq(2), mkq(2)]            # q1とID衝突・q2は取り込み内で重複
+        rows[0]["question"] = {"text": "別問題"}
+        r = prepare_import(rows, ex, image_exists=lambda n: True)
+        self.assertEqual(r["errors"], [])
+        self.assertEqual(len(r["ok"]), 2)
+        self.assertEqual(r["duplicates"], 1)
+        self.assertEqual(len({q["id"] for q in ex + r["ok"]}), 3)      # IDは衝突しない
+        # 登録済みと同じ内容は重複
+        dup = dict(mkq(1), id="z")
+        self.assertEqual(prepare_import([mkq(1)], [dup], image_exists=lambda n: True)["duplicates"], 1)
+
+    def test_prepare_import_errors(self):
+        r = prepare_import([{"question": {"text": "x"}, "choices": [{"text": "a"}, {"text": "b"}], "answer": None}], [])
+        self.assertEqual(r["errors"][0][0], 1)
+        long = {"question": {"text": "あ" * 201}, "choices": [{"text": "a"}, {"text": "b"}], "answer": 0}
+        self.assertIn("長すぎ", prepare_import([long], [])["errors"][0][1])
+        miss = mkq(1)
+        self.assertIn("画像が見つかりません", prepare_import([miss], [], image_exists=lambda n: False)["errors"][0][1])
+        trav = {"question": {"text": "x", "image": "../a.png"}, "choices": [{"text": "a"}, {"text": "b"}], "answer": 0}
+        self.assertEqual(prepare_import([trav], [], image_exists=lambda n: True)["errors"][0][0], 1)
+        many = [{"question": {"text": f"Q{i}"}, "choices": [{"text": "a"}, {"text": "b"}], "answer": 0}
+                for i in range(MAX_QUESTIONS + 1)]
+        self.assertIn("上限", prepare_import(many, [])["errors"][-1][1])
+
+    def test_replace_ignores_existing(self):
+        r = prepare_import([mkq(1)], [dict(mkq(1), id="z")], replace=True, image_exists=lambda n: True)
+        self.assertEqual((len(r["ok"]), r["duplicates"], r["total_after"]), (1, 0, 1))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

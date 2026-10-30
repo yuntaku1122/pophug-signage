@@ -17,8 +17,11 @@
 # 解釈してしまう事故（プロジェクトの頻出バグ）を避けるため、非rawにしてはいけない。
 # ============================================
 
+import csv
 import io
+import json
 import os
+import zipfile
 from datetime import datetime
 
 from flask import Response, request, send_from_directory
@@ -231,6 +234,168 @@ def register_quiz_routes(app, image_folder, quiz_folder=None):
         signage_state.save_settings(image_folder, updates)
         return {k: updates[k] for k in updates}, 200
 
+    # ---------------- 一括取り込み / 書き出し ----------------
+
+    def _read_import_source(f):
+        """アップロードされたファイルから (問題の配列, 同梱画像{小文字名: ZipInfo}, zipオブジェクト) を得る。
+        .json / .csv / .zip（問題ファイル＋画像）に対応。失敗はValueError。"""
+        raw = f.read(quiz_engine.IMPORT_MAX_BYTES + 1)
+        if len(raw) > quiz_engine.IMPORT_MAX_BYTES:
+            raise ValueError(f"ファイルが大きすぎます（{quiz_engine.IMPORT_MAX_BYTES // (1024 * 1024)}MBまで）")
+        ext = os.path.splitext(f.filename or "")[1].lower()
+        if ext == ".zip" or raw[:2] == b"PK":
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(raw))
+            except zipfile.BadZipFile:
+                raise ValueError("ZIPファイルを開けませんでした")
+            infos = [i for i in zf.infolist()
+                     if not i.is_dir() and "__MACOSX" not in i.filename
+                     and not os.path.basename(i.filename).startswith(".")]
+            if len(infos) > 600 or sum(i.file_size for i in infos) > 200 * 1024 * 1024:
+                raise ValueError("ZIPの中身が多すぎる、または大きすぎます")
+            data_info = None
+            for want in (("questions.json",), (".json",), (".csv",)):
+                for i in infos:
+                    base = os.path.basename(i.filename).lower()
+                    if base.endswith(want[0]) if want[0].startswith(".") else base == want[0]:
+                        data_info = i
+                        break
+                if data_info:
+                    break
+            if not data_info:
+                raise ValueError("ZIPの中に questions.json（または .csv）がありません")
+            images = {}
+            for i in infos:
+                base = os.path.basename(i.filename)
+                if os.path.splitext(base)[1].lower() in ALLOWED_IMAGE_EXTS:
+                    images[base.lower()] = i
+            body = zf.read(data_info)
+            is_csv = data_info.filename.lower().endswith(".csv")
+            rows = quiz_engine.parse_import_csv(body) if is_csv else quiz_engine.parse_import_json(body)
+            return rows, images, zf
+        if ext == ".csv":
+            return quiz_engine.parse_import_csv(raw), {}, None
+        if ext in (".json", ".txt", ""):
+            return quiz_engine.parse_import_json(raw), {}, None
+        raise ValueError("JSON・CSV・ZIPのいずれかのファイルを選んでください")
+
+    @app.route("/quiz/api/import", methods=["POST"])
+    def quiz_import():
+        """問題の一括取り込み。dry_run=1 なら検証だけして件数を返す（何も保存しない）。
+        replace=1 なら既存の問題・集計をすべて置き換える。エラーが1件でもあれば何も取り込まない。"""
+        f = request.files.get("file")
+        if not f or not f.filename:
+            return {"error": "ファイルが選ばれていません"}, 400
+        dry_run = request.form.get("dry_run") == "1"
+        replace = request.form.get("replace") == "1"
+        try:
+            rows, zimages, zf = _read_import_source(f)
+        except ValueError as e:
+            return {"error": str(e)}, 400
+
+        def image_exists(name):
+            if name.lower() in zimages:
+                return True
+            return os.path.isfile(os.path.join(img_dir, os.path.basename(name)))
+
+        existing = store.load_questions()
+        result = quiz_engine.prepare_import(rows, existing, replace=replace, image_exists=image_exists)
+        errors = [{"row": n, "message": m} for n, m in result["errors"]]
+        summary = {"count": len(result["ok"]), "duplicates": result["duplicates"],
+                   "total_after": result["total_after"], "errors": errors[:30],
+                   "error_count": len(errors)}
+        if errors:
+            summary["error"] = "取り込めない問題があるため、何も取り込んでいません"
+            return summary, 400
+        if dry_run:
+            return summary, 200
+        if not result["ok"] and not replace:
+            return summary, 200
+
+        # 画像: ZIP同梱の画像は新しい名前で保存し直す（既存の画像と名前が衝突しないように）
+        saved, rename = [], {}
+        try:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for q in result["ok"]:
+                for name in quiz_engine.question_images(q):
+                    key = name.lower()
+                    if key in rename or key not in zimages:
+                        continue
+                    out_ext = ".png" if key.endswith(".png") else ".jpg"
+                    new = f"qimg_{stamp}_{len(rename):03d}{out_ext}"
+                    info = zimages[key]
+                    if info.file_size > MAX_IMAGE_BYTES:
+                        raise ValueError(f"画像が大きすぎます: {name}")
+                    _save_image(zf.read(info), out_ext, os.path.join(img_dir, new))
+                    saved.append(new)
+                    rename[key] = new
+        except (ValueError, KeyError, OSError) as e:
+            for n in saved:
+                try:
+                    os.remove(os.path.join(img_dir, n))
+                except OSError:
+                    pass
+            return {"error": f"画像の取り込みに失敗しました: {e}"}, 400
+        for q in result["ok"]:
+            for part in [q["question"], q["explanation"]] + q["choices"]:
+                if part["image"].lower() in rename:
+                    part["image"] = rename[part["image"].lower()]
+
+        removed_images = set()
+
+        def apply(qs):
+            if replace:
+                for q in qs:
+                    removed_images.update(quiz_engine.question_images(q))
+                return list(result["ok"])
+            return qs + result["ok"]
+
+        try:
+            new_list = store.modify_questions(apply)
+        except ValueError as e:
+            for n in saved:
+                try:
+                    os.remove(os.path.join(img_dir, n))
+                except OSError:
+                    pass
+            return {"error": str(e)}, 400
+        if replace:
+            store.reset_stats()
+            cleanup_images(removed_images, new_list)
+        summary["status"] = "imported"
+        return summary, 200
+
+    @app.route("/quiz/api/template.csv", methods=["GET"])
+    def quiz_template_csv():
+        """Excelでそのまま開けるCSVのひな形（UTF-8 BOM付き）。"""
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(quiz_engine.CSV_TEMPLATE_HEADER)
+        w.writerow(["日本で一番高い山は？", "富士山", "北岳", "A", "標高3,776mで日本一です。", "", "", "", ""])
+        w.writerow(["海は塩辛い？", "はい", "いいえ", "B", "（記入例。この行は削除して使ってください）", "", "", "", ""])
+        data = ("\ufeff" + buf.getvalue()).encode("utf-8")
+        return Response(data, mimetype="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": "attachment; filename=quiz_template.csv"})
+
+    @app.route("/quiz/api/export.zip", methods=["GET"])
+    def quiz_export():
+        """登録済みの問題を、画像ごとZIPにして書き出す（バックアップや別の本体への移行用）。
+        回答の集計は含めない。書き出したZIPは、そのまま一括取り込みできる。"""
+        questions = store.load_questions()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("questions.json", json.dumps(questions, ensure_ascii=False, indent=2))
+            names = set()
+            for q in questions:
+                names |= quiz_engine.question_images(q)
+            for name in sorted(names):
+                path = os.path.join(img_dir, os.path.basename(name))
+                if os.path.isfile(path):
+                    zf.write(path, "images/" + os.path.basename(name))
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return Response(buf.getvalue(), mimetype="application/zip",
+                        headers={"Content-Disposition": f"attachment; filename=quiz_{stamp}.zip"})
+
 
 QUIZ_PAGE = r"""<!DOCTYPE html>
 <html lang="ja">
@@ -299,6 +464,25 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
   <div id="q-list"></div>
   <button type="button" id="add-btn" class="btn-block">＋ 問題を追加</button>
   <p class="status" id="list-status"></p>
+
+  <h2>一括取り込み・書き出し</h2>
+  <div class="box">
+    <p class="hint">たくさんの問題をまとめて登録できます。ExcelやGoogleスプレッドシートで作ったCSV、JSON、画像つきのZIPに対応しています。まず「ひな形CSV」をダウンロードして、問題を書き込んでください（列: 問題・A・B・正解(AかB)・解説）。画像を使う場合は、画像ファイルと一緒にZIPにまとめ、CSVの「問題画像」「A画像」「B画像」「解説画像」列にファイル名を書きます。</p>
+    <div class="row" style="margin-bottom:10px;">
+      <a href="/quiz/api/template.csv" class="btn-small" style="padding:6px 10px;border:1px solid #228b22;border-radius:8px;text-decoration:none;">ひな形CSVをダウンロード</a>
+      <a href="/quiz/api/export.zip" class="btn-small" style="padding:6px 10px;border:1px solid #228b22;border-radius:8px;text-decoration:none;">今の問題をZIPで書き出す</a>
+    </div>
+    <input type="file" id="import-file" accept=".csv,.json,.zip,text/csv,application/json,application/zip" style="width:100%;">
+    <div class="radio-row">
+      <label><input type="radio" name="import-mode" value="append" checked> 今の問題の後ろに追加</label>
+      <label><input type="radio" name="import-mode" value="replace"> すべて置き換える</label>
+    </div>
+    <p class="hint" style="margin-top:6px;">「置き換える」を選ぶと、今ある問題と回答の集計が消えます。</p>
+    <button type="button" id="import-check" class="btn-block" disabled>内容を確認</button>
+    <div id="import-result" style="margin-top:10px; font-size:14px; line-height:1.7;"></div>
+    <button type="button" id="import-run" class="btn-block" style="margin-top:8px; display:none;">この内容で取り込む</button>
+    <p class="status" id="import-status"></p>
+  </div>
 
   <h2>A・Bボタンの割り当て</h2>
   <div class="box">
@@ -649,6 +833,90 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
       if (!confirm('全ての問題の集計をリセットします。よろしいですか？')) { return; }
       try { await api('/quiz/api/stats/reset'); await load(); setStatus('stats-status', 'リセットしました'); }
       catch (e) { setStatus('stats-status', e.message, true); }
+    });
+
+    // ---------- 一括取り込み ----------
+    var importReady = false;
+    function importMode() {
+      var r = document.querySelector('input[name="import-mode"]:checked');
+      return r ? r.value : 'append';
+    }
+    function importForm(dry) {
+      var fd = new FormData();
+      fd.append('file', $('import-file').files[0]);
+      fd.append('replace', importMode() === 'replace' ? '1' : '0');
+      fd.append('dry_run', dry ? '1' : '0');
+      return fd;
+    }
+    function showImportResult(data) {
+      var box = $('import-result');
+      while (box.firstChild) { box.removeChild(box.firstChild); }
+      if (data.count !== undefined && !data.error_count) {
+        var line = data.count + '問を取り込めます';
+        if (data.duplicates) { line += '（登録済みと同じ内容の ' + data.duplicates + '問は除きます）'; }
+        line += ' → 取り込み後は全部で ' + data.total_after + '問';
+        box.appendChild(el('div', { text: line }));
+      }
+      (data.errors || []).forEach(function (e) {
+        box.appendChild(el('div', { style: 'color:#c0392b;', text: (e.row ? e.row + '行目（問）: ' : '') + e.message }));
+      });
+      if (data.error_count > (data.errors || []).length) {
+        box.appendChild(el('div', { style: 'color:#c0392b;', text: '…ほか ' + (data.error_count - data.errors.length) + '件' }));
+      }
+    }
+    async function postImport(dry) {
+      var r = await fetch('/quiz/api/import', { method: 'POST', body: importForm(dry) });
+      var data = {};
+      try { data = await r.json(); } catch (e) { data = {}; }
+      return { ok: r.ok, data: data };
+    }
+    function resetImportUi() {
+      importReady = false;
+      $('import-run').style.display = 'none';
+      $('import-check').disabled = !$('import-file').files.length;
+      showImportResult({});
+      setStatus('import-status', '');
+    }
+    $('import-file').addEventListener('change', resetImportUi);
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="import-mode"]'), function (r) {
+      r.addEventListener('change', resetImportUi);
+    });
+    $('import-check').addEventListener('click', async function () {
+      $('import-check').disabled = true;
+      setStatus('import-status', '確認しています…');
+      try {
+        var res = await postImport(true);
+        showImportResult(res.data);
+        if (res.ok && res.data.count > 0) {
+          importReady = true;
+          $('import-run').style.display = 'block';
+          setStatus('import-status', '内容を確認しました。問題なければ「この内容で取り込む」を押してください');
+        } else if (res.ok) {
+          setStatus('import-status', '取り込める問題がありませんでした（すべて登録済みと同じ内容です）', true);
+        } else {
+          setStatus('import-status', res.data.error || '確認に失敗しました', true);
+        }
+      } catch (e) { setStatus('import-status', '通信に失敗しました', true); }
+      $('import-check').disabled = !$('import-file').files.length;
+    });
+    $('import-run').addEventListener('click', async function () {
+      if (!importReady) { return; }
+      if (importMode() === 'replace' && !confirm('今ある問題と回答の集計をすべて消して、置き換えます。よろしいですか？')) { return; }
+      $('import-run').disabled = true;
+      setStatus('import-status', '取り込んでいます…');
+      try {
+        var res = await postImport(false);
+        if (res.ok) {
+          await load();
+          $('import-file').value = '';
+          resetImportUi();
+          setStatus('import-status', res.data.count + '問を取り込みました');
+        } else {
+          showImportResult(res.data);
+          setStatus('import-status', res.data.error || '取り込みに失敗しました', true);
+        }
+      } catch (e) { setStatus('import-status', '通信に失敗しました', true); }
+      $('import-run').disabled = false;
     });
 
     load().catch(function () { setStatus('list-status', '読み込みに失敗しました。ページを再読み込みしてください', true); });
