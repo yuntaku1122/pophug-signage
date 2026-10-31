@@ -233,6 +233,13 @@ class RoundTests(unittest.TestCase):
         for _ in range(10): t = self.answer(s, 0, t)
         self.assertEqual((s.state, s.round_answered), (STATE_QUESTION, 0))  # 成績発表に入らない
 
+    def test_button_color_settings(self):
+        for c in ("blue", "yellow", "green", "white", "red"):
+            ok, err = validate_quiz_settings({"quiz_color_a": c, "quiz_color_b": c})
+            self.assertEqual((err, ok), ([], {"quiz_color_a": c, "quiz_color_b": c}))
+        _, err = validate_quiz_settings({"quiz_color_a": "pink", "quiz_color_b": ""})
+        self.assertEqual(len(err), 2)
+
     def test_validation_of_new_settings(self):
         ok, err = validate_quiz_settings({"quiz_round_size": 0, "quiz_round_end_seconds": 20, "quiz_hold_reset_seconds": 3})
         self.assertEqual(err, [])

@@ -47,7 +47,11 @@ QUIZ_DEFAULTS = {
     "quiz_round_size": 5,                 # 1人分（1ラウンド）の問題数（0=ラウンド無し・成績を数えない）
     "quiz_round_end_seconds": 20,         # 成績発表の表示中、無操作でこの秒数経つと次のラウンドへ
     "quiz_hold_reset_seconds": 3,         # 回答ボタン長押しで「最初から」になるまでの秒数（画面側で使用）
+    "quiz_color_a": "blue",               # 実機のAボタンの色（画面のA表示をボタンの色に合わせる）
+    "quiz_color_b": "red",                # 実機のBボタンの色
 }
+# 選べるボタンの色（実機のボタンが5色ある想定）。画面側(quiz_screen.py)が色を割り当てる
+BUTTON_COLORS = ("blue", "yellow", "green", "white", "red")
 # A・Bボタンのキーコード割り当て（0=未割り当て→config.pyの既定値）と、画面表示用のキー名
 QUIZ_KEY_SETTINGS = ("quiz_key_a", "quiz_key_b")
 QUIZ_KEY_NAME_SETTINGS = ("quiz_key_a_name", "quiz_key_b_name")
@@ -81,6 +85,11 @@ def validate_quiz_settings(updates):
                 cleaned[key] = value
             else:
                 errors.append((key, "sequential か random を指定してください"))
+        elif key in ("quiz_color_a", "quiz_color_b"):
+            if value in BUTTON_COLORS:
+                cleaned[key] = value
+            else:
+                errors.append((key, "blue / yellow / green / white / red のいずれかを指定してください"))
         elif key in _RANGES:
             lo, hi = _RANGES[key]
             try:

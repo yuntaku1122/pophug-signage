@@ -19,12 +19,23 @@ BG = (18, 18, 26)
 PANEL_BG = (34, 34, 48)
 TEXT = (245, 245, 250)
 SUBTEXT = (170, 170, 190)
-COLOR_A = (46, 110, 190)
-COLOR_B = (214, 84, 120)
+# 実機のボタンの色（Web設定の quiz_color_a / quiz_color_b で選ぶ）。明るい色（黄・白）の上では
+# 文字を暗い色にして読めるようにする
+BUTTON_RGB = {
+    "blue": (46, 110, 190),
+    "yellow": (240, 200, 40),
+    "green": (46, 160, 90),
+    "white": (240, 240, 245),
+    "red": (214, 60, 70),
+}
+COLOR_A = BUTTON_RGB["blue"]
+COLOR_B = BUTTON_RGB["red"]
+DARK_TEXT = (20, 22, 34)
+LIGHT_TEXT = (255, 255, 255)
 OK_COLOR = (46, 160, 90)
 NG_COLOR = (200, 70, 70)
 GAUGE_COLOR = (255, 200, 60)
-CHOICE_COLORS = (COLOR_A, COLOR_B)
+CHOICE_COLORS = (COLOR_A, COLOR_B)   # 設定の既定。実際の描画は _choice_colors(session) を使う
 CHOICE_LETTERS = ("A", "B")
 
 
@@ -151,6 +162,16 @@ class QuizScreen:
         ts = font.render(letter, True, text_color)
         surf.blit(ts, (cx - ts.get_width() // 2, cy - ts.get_height() // 2))
 
+    @staticmethod
+    def _choice_colors(session):
+        """A・Bのボタン色の設定から、[(背景色, 背景に載せる文字色), ...] を返す。"""
+        out = []
+        for key, default in (("quiz_color_a", "blue"), ("quiz_color_b", "red")):
+            rgb = BUTTON_RGB.get(session.settings.get(key), BUTTON_RGB[default])
+            lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+            out.append((rgb, DARK_TEXT if lum > 150 else LIGHT_TEXT))
+        return out
+
     # ---------------- レイアウト ----------------
 
     @staticmethod
@@ -197,19 +218,22 @@ class QuizScreen:
             rects = [(bx, cy, pw, ph), (bx + pw + gap, cy, pw, ph)]
         else:
             rects = [(bx, cy, bw, ph), (bx, cy + ph + gap, bw, ph)]
+        colors = self._choice_colors(session)
         for i, (rx, ry, rw, rh) in enumerate(rects):
-            pygame.draw.rect(surf, CHOICE_COLORS[i], (rx, ry, rw, rh), border_radius=m)
+            bg, fg = colors[i]
+            pygame.draw.rect(surf, bg, (rx, ry, rw, rh), border_radius=m)
             d = max(36, min(int(rh * 0.5), int(rw * 0.2)))
-            self._badge(surf, rx + pad + d // 2, ry + rh // 2, d, CHOICE_LETTERS[i], (255, 255, 255), CHOICE_COLORS[i])
+            self._badge(surf, rx + pad + d // 2, ry + rh // 2, d, CHOICE_LETTERS[i], fg, bg)
             cx0 = rx + pad * 2 + d
             self._draw_part(surf, (cx0, ry + pad, rx + rw - pad - cx0, rh - 2 * pad), q["choices"][i],
-                            max_size=min(int(h * 0.09), int(rh * 0.42)), color=(255, 255, 255),
+                            max_size=min(int(h * 0.09), int(rh * 0.42)), color=fg,
                             vertical_split=False)
 
     def _draw_result(self, surf, w, h, session):
         m, header_h, footer_h, (bx, by, bw, bh) = self._frame(w, h)
         self._draw_header(surf, w, m, header_h, session)
         q = session.current
+        colors = self._choice_colors(session)
         correct = session.is_correct()
         landscape = w >= h
         if landscape:
@@ -260,7 +284,7 @@ class QuizScreen:
             # 上段=バッジ・選択肢・タグ・割合（バーより上に収める）
             l1 = max(20, bar_y - gap - (ry + pad))
             d = min(l1, int(row_h * 0.5))
-            self._badge(surf, lx + m + d // 2, ry + pad + l1 // 2, d, CHOICE_LETTERS[i], CHOICE_COLORS[i])
+            self._badge(surf, lx + m + d // 2, ry + pad + l1 // 2, d, CHOICE_LETTERS[i], colors[i][0], colors[i][1])
             cx0 = lx + m + d + m
             pct = pa if i == 0 else pb
             pf = self.get_font(self._quantize(max(16, int(l1 * 0.8))))
@@ -291,7 +315,7 @@ class QuizScreen:
                             q["choices"][i], max_size=int(l1 * 0.6), vertical_split=False)
             pygame.draw.rect(surf, (60, 60, 80), (bar_x, bar_y, bar_w, bar_h), border_radius=6)
             if pct:
-                pygame.draw.rect(surf, CHOICE_COLORS[i],
+                pygame.draw.rect(surf, colors[i][0],
                                  (bar_x, bar_y, max(6, int(bar_w * pct / 100)), bar_h), border_radius=6)
 
         # 右（下）: 解説
@@ -366,7 +390,8 @@ class QuizScreen:
             self._img_cache = {}
             self._img_cache_qid = q["id"]
         counts = session.store.get_counts(q["id"])
-        key = (session.state, q["id"], session.selected, w, h, counts, session.round_progress())
+        key = (session.state, q["id"], session.selected, w, h, counts, session.round_progress(),
+               session.settings.get("quiz_color_a"), session.settings.get("quiz_color_b"))
         if key != self._layer_key:
             layer = pygame.Surface((w, h))
             layer.fill(BG)

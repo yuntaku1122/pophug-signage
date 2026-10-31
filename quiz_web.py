@@ -793,6 +793,8 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
 
     // ---------- 設定フォーム ----------
     var SETTING_FIELDS = [
+      { key: 'quiz_color_a', label: '実機のAボタンの色（画面のAの色が、この色になります）', type: 'select', options: [['blue', '青'], ['yellow', '黄'], ['green', '緑'], ['white', '白'], ['red', '赤']] },
+      { key: 'quiz_color_b', label: '実機のBボタンの色（画面のBの色が、この色になります）', type: 'select', options: [['blue', '青'], ['yellow', '黄'], ['green', '緑'], ['white', '白'], ['red', '赤']] },
       { key: 'quiz_order', label: '出題の順番', type: 'select', options: [['sequential', '登録した順'], ['random', 'ランダム（一巡するまで同じ問題は出ません）']] },
       { key: 'quiz_round_size', label: '1人分の問題数（0にすると成績を数えず、問題が続きます）', min: 0, max: 50 },
       { key: 'quiz_result_idle_seconds', label: '解説を表示してから、操作が無くても次の問題へ進むまでの秒数', min: 5, max: 600 },
