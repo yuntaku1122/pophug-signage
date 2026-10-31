@@ -459,29 +459,11 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
     <p class="hint">押しボタン2個（A・B）で答える2択クイズです。問題を1問以上登録すると、サイネージ本体のメニューに「クイズモードへ」が表示されます（本体ボタンを押す→短押しで項目を選ぶ→長押しで決定）。</p>
   </div>
 
-  <h2>問題一覧</h2>
-  <p class="hint">登録した順に出題されます（設定でランダムにもできます）。画像のみ・テキストのみ・両方のどれでも登録できます。</p>
-  <div id="q-list"></div>
-  <button type="button" id="add-btn" class="btn-block">＋ 問題を追加</button>
-  <p class="status" id="list-status"></p>
-
-  <h2>一括取り込み・書き出し</h2>
+  <h2>出題と進行の設定</h2>
   <div class="box">
-    <p class="hint">たくさんの問題をまとめて登録できます。ExcelやGoogleスプレッドシートで作ったCSV、JSON、画像つきのZIPに対応しています。まず「ひな形CSV」をダウンロードして、問題を書き込んでください（列: 問題・A・B・正解(AかB)・解説）。画像を使う場合は、画像ファイルと一緒にZIPにまとめ、CSVの「問題画像」「A画像」「B画像」「解説画像」列にファイル名を書きます。</p>
-    <div class="row" style="margin-bottom:10px;">
-      <a href="/quiz/api/template.csv" class="btn-small" style="padding:6px 10px;border:1px solid #228b22;border-radius:8px;text-decoration:none;">ひな形CSVをダウンロード</a>
-      <a href="/quiz/api/export.zip" class="btn-small" style="padding:6px 10px;border:1px solid #228b22;border-radius:8px;text-decoration:none;">今の問題をZIPで書き出す</a>
-    </div>
-    <input type="file" id="import-file" accept=".csv,.json,.zip,text/csv,application/json,application/zip" style="width:100%;">
-    <div class="radio-row">
-      <label><input type="radio" name="import-mode" value="append" checked> 今の問題の後ろに追加</label>
-      <label><input type="radio" name="import-mode" value="replace"> すべて置き換える</label>
-    </div>
-    <p class="hint" style="margin-top:6px;">「置き換える」を選ぶと、今ある問題と回答の集計が消えます。</p>
-    <button type="button" id="import-check" class="btn-block" disabled>内容を確認</button>
-    <div id="import-result" style="margin-top:10px; font-size:14px; line-height:1.7;"></div>
-    <button type="button" id="import-run" class="btn-block" style="margin-top:8px; display:none;">この内容で取り込む</button>
-    <p class="status" id="import-status"></p>
+    <div id="settings-form"></div>
+    <button type="button" id="save-settings" class="btn-block" style="margin-top:16px;">設定を保存</button>
+    <p class="status" id="settings-status"></p>
   </div>
 
   <h2>A・Bボタンの割り当て</h2>
@@ -504,12 +486,32 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
     <p class="status" id="key-status"></p>
   </div>
 
-  <h2>出題と進行の設定</h2>
-  <div class="box">
-    <div id="settings-form"></div>
-    <button type="button" id="save-settings" class="btn-block" style="margin-top:16px;">設定を保存</button>
-    <p class="status" id="settings-status"></p>
+  <details id="import-details" style="margin-top:28px;">
+    <summary style="font-size:16px; font-weight:bold; cursor:pointer; padding:6px 0;">一括取り込み・書き出し（タップで開く）</summary>
+  <div class="box" style="margin-top:8px;">
+    <p class="hint">たくさんの問題をまとめて登録できます。ExcelやGoogleスプレッドシートで作ったCSV、JSON、画像つきのZIPに対応しています。まず「ひな形CSV」をダウンロードして、問題を書き込んでください（列: 問題・A・B・正解(AかB)・解説）。画像を使う場合は、画像ファイルと一緒にZIPにまとめ、CSVの「問題画像」「A画像」「B画像」「解説画像」列にファイル名を書きます。</p>
+    <div class="row" style="margin-bottom:10px;">
+      <a href="/quiz/api/template.csv" class="btn-small" style="padding:6px 10px;border:1px solid #228b22;border-radius:8px;text-decoration:none;">ひな形CSVをダウンロード</a>
+      <a href="/quiz/api/export.zip" class="btn-small" style="padding:6px 10px;border:1px solid #228b22;border-radius:8px;text-decoration:none;">今の問題をZIPで書き出す</a>
+    </div>
+    <input type="file" id="import-file" accept=".csv,.json,.zip,text/csv,application/json,application/zip" style="width:100%;">
+    <div class="radio-row">
+      <label><input type="radio" name="import-mode" value="append" checked> 今の問題の後ろに追加</label>
+      <label><input type="radio" name="import-mode" value="replace"> すべて置き換える</label>
+    </div>
+    <p class="hint" style="margin-top:6px;">「置き換える」を選ぶと、今ある問題と回答の集計が消えます。</p>
+    <button type="button" id="import-check" class="btn-block" disabled>内容を確認</button>
+    <div id="import-result" style="margin-top:10px; font-size:14px; line-height:1.7;"></div>
+    <button type="button" id="import-run" class="btn-block" style="margin-top:8px; display:none;">この内容で取り込む</button>
+    <p class="status" id="import-status"></p>
   </div>
+  </details>
+
+  <h2>問題一覧</h2>
+  <p class="hint">登録した順に出題されます（設定でランダムにもできます）。画像のみ・テキストのみ・両方のどれでも登録できます。</p>
+  <div id="q-list"></div>
+  <button type="button" id="add-btn" class="btn-block">＋ 問題を追加</button>
+  <p class="status" id="list-status"></p>
 
   <h2>回答の集計</h2>
   <div class="box">
