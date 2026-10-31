@@ -212,7 +212,6 @@ class PopSignage:
         self.menu_active = False
         self.menu_items = []            # [(id, 表示ラベル), ...] 開いた時点の一覧
         self.menu_index = 0
-        self.menu_confirm = None        # "shutdown" の間は確認画面を表示中
         self.menu_last_input_time = 0   # 最後に操作された時刻（無操作タイムアウト用）
         self._menu_pause_start = 0      # メニューを開いて（スライドショーを止めて）いる開始時刻
         self._menu_render_cache = {"key": None, "surface": None}
@@ -692,9 +691,8 @@ class PopSignage:
         通常画面で押す        : 機能メニューを開く
         メニュー内で短押し    : 次の項目へ（最後の項目の次は先頭に戻る）
         メニュー内で長押し    : 選んだ項目を決定（MENU_DECIDE_HOLD_SECONDS秒以上押して離す）
-        シャットダウンだけは、決定後に確認画面を挟み、もう一度長押しで実行、
-        短押しでキャンセルになる。メニューは無操作でMENU_TIMEOUT_SECONDS秒経つと
-        自動的に閉じる。
+        シャットダウンはメニューの先頭項目で、長押し1回で実行する（確認画面は無い）。
+        メニューは無操作でMENU_TIMEOUT_SECONDS秒経つと自動的に閉じる。
         QR表示・取扱説明・Wi-Fiセットアップ・USB書き出し待受けの各画面が出ている間は、
         ボタンを押すとその画面を閉じる（従来通り）。
         判定は「離した瞬間の合計押下時間」で行う（押している間は毎フレーム
@@ -806,7 +804,9 @@ class PopSignage:
     def _build_menu_items(self):
         """今の状態に応じたメニュー項目の一覧を作る。[(id, 表示ラベル), ...]
         USBアップデートの項目は、確定待ちのパッケージがある時だけ表示する。"""
-        items = []
+        # 頻繁に使うシャットダウンを先頭にする（短押しの回数を減らすため）。
+        # 確認画面は設けず、1回の長押しで実行する。
+        items = [("shutdown", "シャットダウン")]
         if self.quiz_active:
             items += [
                 ("quiz_reset", "クイズを最初からやり直す"),
@@ -826,7 +826,6 @@ class PopSignage:
         items += [
             ("export", "USB書き出し待受け"),
             ("reset", "表示をリセット（固定表示のみに）"),
-            ("shutdown", "シャットダウン"),
             ("close", "閉じる"),
         ]
         return items
@@ -838,7 +837,6 @@ class PopSignage:
             self.quiz_store.flush()   # 店主が操作する区切りで、未保存の回答集計を書き出す
         self.menu_items = self._build_menu_items()
         self.menu_index = 0
-        self.menu_confirm = None
         self.menu_active = True
         self.menu_last_input_time = time.time()
         self._menu_pause_start = self.menu_last_input_time  # スライドショーを止めた時刻
@@ -857,25 +855,15 @@ class PopSignage:
             if self.in_transition:
                 self.transition_start_time += paused
         self.menu_active = False
-        self.menu_confirm = None
         self._menu_render_cache = {"key": None, "surface": None}
         log(f"機能メニューを閉じました（{reason}）")
 
     def _menu_handle_release(self, held_seconds):
         """メニュー表示中にボタンが離された時の処理。
         MENU_DECIDE_HOLD_SECONDS秒以上=決定、それ未満=次の項目へ。
-        シャットダウン確認画面では、長押し=実行、短押し=キャンセル（メニューの一覧に戻る）。"""
+        シャットダウンも他の項目と同じく、長押し1回で実行する（確認画面は無い）。"""
         self.menu_last_input_time = time.time()
         decided = held_seconds >= MENU_DECIDE_HOLD_SECONDS
-
-        if self.menu_confirm == "shutdown":
-            if decided:
-                self._close_menu("シャットダウンを確定")
-                self._trigger_button_shutdown()
-            else:
-                self.menu_confirm = None
-                log("シャットダウンをキャンセルしました")
-            return
 
         if not self.menu_items:
             self._close_menu("項目なし")
@@ -888,15 +876,12 @@ class PopSignage:
             self.menu_index = (self.menu_index + 1) % len(self.menu_items)
 
     def _menu_execute(self, item_id):
-        """メニューで決定された項目を実行する。シャットダウンだけは
-        メニューを開いたまま確認画面へ進み、それ以外はメニューを閉じてから実行する。"""
+        """メニューで決定された項目を、メニューを閉じてから実行する。"""
         log(f"機能メニューで決定: {item_id}")
-        if item_id == "shutdown":
-            self.menu_confirm = "shutdown"
-            return
-
         self._close_menu(f"{item_id}を決定")
-        if item_id == "qr":
+        if item_id == "shutdown":
+            self._trigger_button_shutdown()
+        elif item_id == "qr":
             self.toggle_qr_code()
         elif item_id == "manual":
             self.toggle_manual()
@@ -993,7 +978,7 @@ class PopSignage:
             f"再度適用するにはUSBメモリーを挿し直してください")
 
     def _trigger_button_shutdown(self):
-        """機能メニューのシャットダウン確認（長押し）でシャットダウンを実行する
+        """機能メニューの「シャットダウン」（長押し1回）でシャットダウンを実行する
         （Web版と同じsudoersの許可を利用）。
         以前はここで「シャットダウンしています...」を1フレームだけ描画してflipしていたが、
         実際のシャットダウンコマンドが効くまでの1秒ほどの間にrun()側の通常描画（スライドショー）
@@ -1004,7 +989,6 @@ class PopSignage:
         self._hide_qr()
         self.manual_active = False
         self.menu_active = False
-        self.menu_confirm = None
         self._shutting_down = True
 
         def do_shutdown():
@@ -1380,24 +1364,6 @@ class PopSignage:
         band_h = m["band_h"]
         help_size = m["help_size"]
 
-        if self.menu_confirm == "shutdown":
-            title = self._render_fit_text("シャットダウンしますか？", w - margin * 2,
-                                          start_size=unit * 2, min_size=16, color=(255, 120, 120))
-            sub1 = self._render_fit_text("もう一度長押しで実行", w - margin * 2,
-                                         start_size=int(unit * 1.5), min_size=12, color=(255, 255, 255))
-            sub2 = self._render_fit_text("短く押すとキャンセル", w - margin * 2,
-                                         start_size=int(unit * 1.5), min_size=12, color=(200, 200, 210))
-            total_h = title.get_height() + unit + sub1.get_height() + unit // 2 + sub2.get_height()
-            y = (h - band_h) // 2 - total_h // 2
-            blit_center(title, y)
-            y += title.get_height() + unit
-            blit_center(sub1, y)
-            y += sub1.get_height() + unit // 2
-            blit_center(sub2, y)
-            foot = self._render_fit_text(timeout_text, w - margin * 2,
-                                         start_size=help_size, min_size=10, color=(150, 150, 160))
-            blit_center(foot, h - band_h - foot.get_height() - unit // 2)
-            return surf
 
         title = self._render_fit_text("メニュー", w - margin * 2,
                                       start_size=int(unit * 1.8), min_size=14, color=(255, 255, 255))
@@ -1446,7 +1412,7 @@ class PopSignage:
             remaining = max(0.0, MENU_TIMEOUT_SECONDS - (time.time() - self.menu_last_input_time))
         remaining_sec = int(math.ceil(remaining))
 
-        key = (tuple(self.menu_items), self.menu_index, self.menu_confirm, w, h, remaining_sec)
+        key = (tuple(self.menu_items), self.menu_index, w, h, remaining_sec)
         if self._menu_render_cache.get("key") != key:
             self._menu_render_cache = {"key": key, "surface": self._render_menu_layer(w, h, remaining_sec)}
         self.canvas.blit(self._menu_render_cache["surface"], (0, 0))
@@ -1460,11 +1426,11 @@ class PopSignage:
         bar_h = m["bar_h"]
         bar_rect = pygame.Rect(margin, h - bar_h - m["bottom_gap"], w - margin * 2, bar_h)
         full = progress >= 1.0
-        danger = (self.menu_confirm == "shutdown")
+        danger = bool(self.menu_items) and self.menu_items[self.menu_index][0] == "shutdown"
         if danger:
             fill_color = (255, 60, 60) if full else (255, 130, 100)
             label_color = (255, 120, 120)
-            text = "離すとシャットダウンを実行" if full else "そのまま押し続けて実行…"
+            text = "離すとシャットダウンを実行" if full else "そのまま押し続けてシャットダウン…"
         else:
             fill_color = (120, 220, 140) if full else (255, 210, 120)
             label_color = (150, 235, 170) if full else (255, 255, 255)
