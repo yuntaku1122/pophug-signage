@@ -272,12 +272,6 @@ UPLOAD_PAGE = """
     <a href="/quiz" style="display:block; text-align:center; padding:14px; background:#555; color:#fff; border-radius:8px; text-decoration:none; font-size:16px;">クイズの問題を登録・管理する</a>
   </div>
 
-  <h2>画像一覧</h2>
-  <p class="hint">スイッチON＝サイネージに表示中。切り替えると即座に保存され、サイネージには最大__RESCAN_SEC__秒で反映されます。</p>
-  <div class="gallery">
-    __GALLERY__
-  </div>
-
   <div class="modal-overlay" id="image-modal-overlay">
     <div class="modal-content">
       <button type="button" class="modal-close" id="modal-close-btn" aria-label="閉じる">×</button>
@@ -733,6 +727,12 @@ UPLOAD_PAGE = """
       <button type="button" id="rotate-right">⟳ 右に90度</button>
     </div>
     <p class="setting-status" id="rotation-status"></p>
+  </div>
+
+  <h2>画像一覧</h2>
+  <p class="hint">スイッチON＝サイネージに表示中。切り替えると即座に保存され、サイネージには最大__RESCAN_SEC__秒で反映されます。</p>
+  <div class="gallery">
+    __GALLERY__
   </div>
 
   <script>
