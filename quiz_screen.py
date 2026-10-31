@@ -343,8 +343,6 @@ class QuizScreen:
         if session.state == STATE_QUESTION:
             return f"A・Bのボタンで答えてね　／　どちらかを{hold}秒長押しで最初から"
         if session.state == STATE_RESULT:
-            if session.lockout_remaining(now) > 0:
-                return "結果をチェック！"
             remain = max(0, int(session.settings["quiz_result_idle_seconds"] - (now - session.last_event_time)) + 1)
             return f"ボタンを押すと次へ　（あと{remain}秒で自動で次へ）"
         remain = max(0, int(session.settings["quiz_round_end_seconds"] - (now - session.last_event_time)) + 1)

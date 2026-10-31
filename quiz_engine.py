@@ -44,7 +44,6 @@ QUIZ_DEFAULTS = {
     "quiz_order": ORDER_SEQUENTIAL,       # sequential / random
     "quiz_result_idle_seconds": 30,       # 結果・解説表示中、無操作でこの秒数経つと次の問題へ
     "quiz_question_idle_seconds": 60,     # 出題中、無回答でこの秒数経つと次の問題へ（0=無効）
-    "quiz_answer_lockout_seconds": 3,     # 回答直後、ボタンを受け付けない秒数（連打・多重集計の防止）
     "quiz_round_size": 5,                 # 1人分（1ラウンド）の問題数（0=ラウンド無し・成績を数えない）
     "quiz_round_end_seconds": 20,         # 成績発表の表示中、無操作でこの秒数経つと次のラウンドへ
     "quiz_hold_reset_seconds": 3,         # 回答ボタン長押しで「最初から」になるまでの秒数（画面側で使用）
@@ -55,10 +54,13 @@ QUIZ_KEY_NAME_SETTINGS = ("quiz_key_a_name", "quiz_key_b_name")
 QUIZ_SETTING_KEYS = tuple(QUIZ_DEFAULTS) + QUIZ_KEY_SETTINGS + QUIZ_KEY_NAME_SETTINGS
 MAX_QUESTIONS = 100
 
+# 回答・成績発表の直後に、ボタンのチャタリング（1回の押下が2回に見える）で
+# 意図せず先へ進むのを防ぐだけの内部定数。人が押し直す間隔より十分短く、設定は設けない。
+ADVANCE_DEBOUNCE_SECONDS = 0.3
+
 _RANGES = {
     "quiz_result_idle_seconds": (5, 600),
     "quiz_question_idle_seconds": (0, 600),
-    "quiz_answer_lockout_seconds": (0, 10),
     "quiz_round_size": (0, 50),
     "quiz_round_end_seconds": (5, 600),
     "quiz_hold_reset_seconds": (1, 10),
@@ -291,8 +293,7 @@ class QuizSession:
 
     press(choice, now): 本体の押しボタン（0=A, 1=B）が押された時に呼ぶ。
       出題中は回答として扱い、結果表示へ移る。結果表示中・成績発表中は、
-      どのボタンでも先へ進む。ただし回答直後などはlockout秒間だけ無視する
-      （連打・結果を見ずに飛ばすのを防止）。
+      どのボタンでも先へ進む（待機時間なし。チャタリング防止の0.3秒だけ無視する）。
     tick(now): 毎フレーム呼ぶ。無操作タイムアウトで先へ進める。
     hold_reset(now): 回答ボタン長押し・本体メニューからの「最初から」。
 
@@ -395,7 +396,7 @@ class QuizSession:
 
     def shift_time(self, delta):
         """クイズ画面が他の画面（メニュー等）に隠れていた間の時間を、
-        無操作タイマー・ロックアウトから差し引く（隠れている間に時間切れしないように）。"""
+        無操作タイマー・チャタリング防止から差し引く（隠れている間に時間切れしないように）。"""
         self.last_event_time += delta
         self.answered_time += delta
 
@@ -415,9 +416,10 @@ class QuizSession:
         return percentages(a, b)
 
     def lockout_remaining(self, now):
+        """チャタリング防止の残り秒数（ほぼ0）。画面表示には使わない。"""
         if self.state == STATE_QUESTION:
             return 0.0
-        return max(0.0, self.settings["quiz_answer_lockout_seconds"] - (now - self.answered_time))
+        return max(0.0, ADVANCE_DEBOUNCE_SECONDS - (now - self.answered_time))
 
     def _round_finished(self):
         size = self.round_size
@@ -426,7 +428,7 @@ class QuizSession:
     def _finish_round_display(self, now):
         self.state = STATE_ROUND_END
         self.selected = None
-        self.answered_time = now      # 成績発表の直後も、誤って飛ばさないようlockoutを効かせる
+        self.answered_time = now      # 成績発表の直後も、チャタリングで飛ばさないようデバウンスを効かせる
         self.last_event_time = now
         self.last_transition = "round_end"
 

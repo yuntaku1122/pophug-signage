@@ -795,7 +795,6 @@ QUIZ_PAGE = r"""<!DOCTYPE html>
       { key: 'quiz_round_size', label: '1人分の問題数（0にすると成績を数えず、問題が続きます）', min: 0, max: 50 },
       { key: 'quiz_result_idle_seconds', label: '解説を表示してから、操作が無くても次の問題へ進むまでの秒数', min: 5, max: 600 },
       { key: 'quiz_question_idle_seconds', label: '出題中に誰も答えない時、次の問題に替えるまでの秒数（0で替えない）', min: 0, max: 600 },
-      { key: 'quiz_answer_lockout_seconds', label: '回答した直後、ボタンを受け付けない秒数（連打防止）', min: 0, max: 10 },
       { key: 'quiz_round_end_seconds', label: '成績発表から次の人へ進むまでの秒数', min: 5, max: 600 },
       { key: 'quiz_hold_reset_seconds', label: 'ボタン長押しで最初からやり直す秒数', min: 1, max: 10 }
     ];

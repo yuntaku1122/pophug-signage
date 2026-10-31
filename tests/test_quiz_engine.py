@@ -44,7 +44,7 @@ class T(unittest.TestCase):
         s = self.sess(3)
         seen = [s.current["id"]]
         for t in range(1, 6):
-            s.press(0, t * 100); s.press(0, t * 100 + 10)   # 回答→(lockout後)次へ
+            s.press(0, t * 100); s.press(0, t * 100 + 10)   # 回答→次へ
             seen.append(s.current["id"])
         self.assertEqual(seen, ["q1", "q2", "q3", "q1", "q2", "q3"])
 
@@ -58,14 +58,14 @@ class T(unittest.TestCase):
             self.assertEqual(sorted(seq[i:i + 4]), ["q1", "q2", "q3", "q4"])  # 一巡で全問
         self.assertTrue(all(a != b for a, b in zip(seq, seq[1:])))
 
-    def test_lockout_and_button_advance(self):
+    def test_button_advance_without_wait(self):
         s = self.sess(2)
         self.assertTrue(s.press(0, 10))                 # 回答
         self.assertEqual(s.state, STATE_RESULT)
-        self.assertFalse(s.press(1, 11))                # lockout 3s中は無視
+        self.assertFalse(s.press(1, 10.1))              # チャタリング防止の0.3秒だけ無視
         self.assertEqual(s.state, STATE_RESULT)
         self.assertEqual(self.store.get_counts("q1"), (1, 0))  # 多重集計されない
-        self.assertTrue(s.press(1, 13.1))               # 解放後は次へ
+        self.assertTrue(s.press(1, 10.4))               # 0.4秒後には次へ進める
         self.assertEqual((s.state, s.current["id"]), (STATE_QUESTION, "q2"))
 
     def test_result_idle_30s_default_and_custom(self):
@@ -164,7 +164,7 @@ class RoundTests(unittest.TestCase):
         return QuizSession(self.store, base, rng=random.Random(1), now=0)
 
     def answer(self, s, choice, t):
-        s.press(choice, t); s.press(0, t + 10)  # 回答→(lockout後)先へ
+        s.press(choice, t); s.press(0, t + 10)  # 回答→先へ
         return t + 100
 
     def test_round_score_and_end_screen(self):
@@ -178,8 +178,8 @@ class RoundTests(unittest.TestCase):
         s.press(0, t + 10)                            # 最後の結果→成績発表
         self.assertEqual((s.state, s.last_transition), (STATE_ROUND_END, "round_end"))
         self.assertEqual((s.round_answered, s.round_correct), (3, 2))   # 2/3問正解
-        self.assertFalse(s.press(0, t + 11))          # 発表直後はlockout
-        self.assertTrue(s.press(0, t + 14))
+        self.assertFalse(s.press(0, t + 10.1))        # 発表直後はチャタリング防止のみ
+        self.assertTrue(s.press(0, t + 10.5))
         self.assertEqual((s.state, s.round_answered, s.round_correct), (STATE_QUESTION, 0, 0))
         self.assertEqual(s.current["id"], "q4")       # 出題順は続きから（次の人用）
 
@@ -219,7 +219,7 @@ class RoundTests(unittest.TestCase):
                              (STATE_QUESTION, 0, 0, "q1", "reset"))
         self.assertEqual(self.store.get_counts("q1")[0] >= 1, True)
 
-    def test_shift_time_pauses_idle_and_lockout(self):
+    def test_shift_time_pauses_idle(self):
         s = self.mk(quiz_question_idle_seconds=20)
         s.shift_time(100)                       # 100秒隠れていた分を差し引く（last_event_time=0→100）
         self.assertFalse(s.tick(110))           # 見かけ上10秒しか経っていない
